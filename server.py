@@ -12,6 +12,7 @@ Only the Python standard library is used, so there is nothing to pip install.
 import json
 import os
 import re
+import threading
 import time
 import uuid
 import urllib.request
@@ -33,6 +34,10 @@ def load_config():
 
 
 CONFIG = load_config()
+
+# Registry of in-flight runs so a separate request can cancel them.
+RUNS = {}            # run_id -> {"cancel": bool}
+RUNS_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------- #
@@ -62,35 +67,97 @@ def list_models():
         return {"ok": False, "error": str(e), "models": []}
 
 
-def chat_completion(model, messages, params):
+def chat_completion(model, messages, params, should_cancel=None, on_progress=None):
+    """Call the streaming chat-completions API and collect rich timing/token
+    metrics. `should_cancel()` is polled between chunks to allow instant stop;
+    `on_progress(partial_text, token_count)` is called as tokens arrive."""
     payload = {
         "model": model,
         "messages": messages,
         "temperature": params.get("temperature", 0),
         "max_tokens": params.get("max_tokens", 1024),
-        "stream": False,
+        "stream": True,
+        "stream_options": {"include_usage": True},
     }
     if "top_p" in params:
         payload["top_p"] = params["top_p"]
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(lmstudio_url("/chat/completions"), data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+
     t0 = time.time()
-    data = http_json(
-        "POST",
-        lmstudio_url("/chat/completions"),
-        payload,
-        timeout=CONFIG.get("request_timeout_seconds", 600),
-    )
-    elapsed = time.time() - t0
-    content = ""
-    try:
-        content = data["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError):
-        content = ""
-    usage = data.get("usage", {}) or {}
+    ttft = None
+    parts = []
+    chunk_tokens = 0
+    usage = {}
+    finish_reason = None
+    cancelled = False
+
+    timeout = CONFIG.get("request_timeout_seconds", 600)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        for raw in resp:
+            if should_cancel and should_cancel():
+                cancelled = True
+                break
+            line = raw.decode("utf-8", "replace").strip()
+            if not line or not line.startswith("data:"):
+                continue
+            chunk = line[len("data:"):].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                obj = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("usage"):
+                usage = obj["usage"]
+            for ch in obj.get("choices") or []:
+                delta = ch.get("delta") or {}
+                piece = delta.get("content")
+                if piece:
+                    if ttft is None:
+                        ttft = time.time() - t0
+                    parts.append(piece)
+                    chunk_tokens += 1
+                    if on_progress:
+                        on_progress("".join(parts), chunk_tokens)
+                if ch.get("finish_reason"):
+                    finish_reason = ch["finish_reason"]
+
+    end = time.time()
+    content = "".join(parts)
+    latency = end - t0
+    completion_tokens = usage.get("completion_tokens") or (chunk_tokens or None)
+    prompt_tokens = usage.get("prompt_tokens")
+    total_tokens = usage.get("total_tokens")
+    if total_tokens is None and completion_tokens is not None and prompt_tokens is not None:
+        total_tokens = completion_tokens + prompt_tokens
+
+    # tokens/sec over the decode window (first token -> last token), the figure
+    # people usually quote. For very short or buffered outputs the window can be
+    # a sub-millisecond measurement artifact, so only trust it when there are
+    # enough tokens over a long enough window; otherwise fall back to the stable
+    # whole-call throughput (completion tokens / total latency).
+    tps = None
+    if completion_tokens:
+        decode_window = (end - (t0 + ttft)) if ttft is not None else None
+        if decode_window and decode_window > 0.15 and completion_tokens >= 4:
+            tps = completion_tokens / decode_window
+        elif latency > 0:
+            tps = completion_tokens / latency
+
     return {
         "content": content,
-        "latency_s": round(elapsed, 3),
-        "tokens": usage.get("completion_tokens"),
-        "prompt_tokens": usage.get("prompt_tokens"),
+        "latency_s": round(latency, 3),
+        "ttft_s": round(ttft, 3) if ttft is not None else None,
+        "tokens": completion_tokens,
+        "prompt_tokens": prompt_tokens,
+        "total_tokens": total_tokens,
+        "tokens_per_second": round(tps, 1) if tps is not None else None,
+        "finish_reason": finish_reason,
+        "cancelled": cancelled,
     }
 
 
@@ -264,42 +331,71 @@ def build_messages(bench, case):
     return messages
 
 
-def run_benchmark_stream(model, bench, params, emit):
-    """emit(dict) pushes one NDJSON event to the client."""
+def _avg(xs):
+    xs = [x for x in xs if x is not None]
+    return round(sum(xs) / len(xs), 3) if xs else None
+
+
+def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
+    """emit(dict) pushes one NDJSON event to the client.
+    Returns (summary, case_results, cancelled)."""
     cases = bench.get("cases", [])
     total = len(cases)
     passed = 0
-    latencies = []
+    latencies, ttfts, tps_list = [], [], []
+    comp_tokens_sum = 0
+    prompt_tokens_sum = 0
     case_results = []
+    cancelled = False
     emit({"type": "start", "benchmark_id": bench["id"],
           "benchmark_name": bench["name"], "total": total})
 
     for i, case in enumerate(cases):
+        if should_cancel and should_cancel():
+            cancelled = True
+            break
+        case_id = case.get("id", f"case_{i+1}")
+        emit({"type": "case_start", "benchmark_id": bench["id"], "index": i,
+              "total": total, "case_id": case_id, "prompt": case["prompt"]})
         merged = dict(CONFIG.get("default_params", {}))
         merged.update(bench.get("default_params", {}))
         merged.update(params or {})
         try:
             messages = build_messages(bench, case)
-            res = chat_completion(model, messages, merged)
+            res = chat_completion(model, messages, merged, should_cancel=should_cancel)
+            if res.get("cancelled"):
+                cancelled = True
+                break
             ok, detail = score_case(bench["scoring"], case.get("expected"),
                                     res["content"], case.get("prompt"))
             if res["latency_s"] is not None:
                 latencies.append(res["latency_s"])
+            if res.get("ttft_s") is not None:
+                ttfts.append(res["ttft_s"])
+            if res.get("tokens_per_second") is not None:
+                tps_list.append(res["tokens_per_second"])
+            comp_tokens_sum += res.get("tokens") or 0
+            prompt_tokens_sum += res.get("prompt_tokens") or 0
             if ok:
                 passed += 1
             cr = {
-                "id": case.get("id", f"case_{i+1}"),
+                "id": case_id,
                 "prompt": case["prompt"],
                 "expected": case.get("expected"),
                 "output": res["content"],
                 "passed": ok,
                 "detail": detail,
                 "latency_s": res["latency_s"],
+                "ttft_s": res.get("ttft_s"),
                 "tokens": res["tokens"],
+                "prompt_tokens": res.get("prompt_tokens"),
+                "total_tokens": res.get("total_tokens"),
+                "tokens_per_second": res.get("tokens_per_second"),
+                "finish_reason": res.get("finish_reason"),
             }
         except Exception as e:  # noqa: BLE001
             cr = {
-                "id": case.get("id", f"case_{i+1}"),
+                "id": case_id,
                 "prompt": case["prompt"],
                 "expected": case.get("expected"),
                 "output": "",
@@ -312,6 +408,8 @@ def run_benchmark_stream(model, bench, params, emit):
         case_results.append(cr)
         emit({"type": "case", "index": i, "total": total, "result": cr})
 
+    answered = len(case_results)
+    total_time = round(sum(x for x in latencies), 3) if latencies else 0.0
     summary = {
         "type": "done",
         "benchmark_id": bench["id"],
@@ -319,27 +417,47 @@ def run_benchmark_stream(model, bench, params, emit):
         "category": bench.get("category"),
         "model": model,
         "total": total,
+        "answered": answered,
         "passed": passed,
-        "score": round(100.0 * passed / total, 1) if total else 0.0,
-        "avg_latency_s": round(sum(latencies) / len(latencies), 3) if latencies else None,
+        "score": round(100.0 * passed / answered, 1) if answered else 0.0,
+        "avg_latency_s": _avg(latencies),
+        "avg_ttft_s": _avg(ttfts),
+        "avg_tokens_per_second": _avg(tps_list),
+        "total_completion_tokens": comp_tokens_sum,
+        "total_prompt_tokens": prompt_tokens_sum,
+        "total_tokens": comp_tokens_sum + prompt_tokens_sum,
+        "total_time_s": total_time,
+        "cancelled": cancelled,
     }
     emit(summary)
-    return summary, case_results
+    return summary, case_results, cancelled
 
 
-def save_result(model, summaries, all_cases, params):
+def save_result(model, summaries, all_cases, params, cancelled=False):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     rid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     total = sum(s["total"] for s in summaries)
+    answered = sum(s.get("answered", s["total"]) for s in summaries)
     passed = sum(s["passed"] for s in summaries)
+    comp_tokens = sum(s.get("total_completion_tokens") or 0 for s in summaries)
+    prompt_tokens = sum(s.get("total_prompt_tokens") or 0 for s in summaries)
+    total_time = round(sum(s.get("total_time_s") or 0 for s in summaries), 3)
+    tps_vals = [s.get("avg_tokens_per_second") for s in summaries if s.get("avg_tokens_per_second")]
     record = {
         "id": rid,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": model,
         "params": params,
-        "overall_score": round(100.0 * passed / total, 1) if total else 0.0,
+        "cancelled": cancelled,
+        "overall_score": round(100.0 * passed / answered, 1) if answered else 0.0,
         "total": total,
+        "answered": answered,
         "passed": passed,
+        "total_completion_tokens": comp_tokens,
+        "total_prompt_tokens": prompt_tokens,
+        "total_tokens": comp_tokens + prompt_tokens,
+        "total_time_s": total_time,
+        "avg_tokens_per_second": round(sum(tps_vals) / len(tps_vals), 1) if tps_vals else None,
         "benchmarks": summaries,
         "cases": all_cases,
     }
@@ -364,7 +482,12 @@ def list_results():
                 "model": r["model"],
                 "overall_score": r["overall_score"],
                 "total": r["total"],
+                "answered": r.get("answered", r["total"]),
                 "passed": r["passed"],
+                "cancelled": r.get("cancelled", False),
+                "total_tokens": r.get("total_tokens"),
+                "total_time_s": r.get("total_time_s"),
+                "avg_tokens_per_second": r.get("avg_tokens_per_second"),
                 "benchmarks": [
                     {"benchmark_name": b["benchmark_name"], "score": b["score"],
                      "passed": b["passed"], "total": b["total"]}
@@ -493,6 +616,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/run":
             self._handle_run()
             return
+        if path == "/api/run/stop":
+            body = self._read_body()
+            rid = body.get("run_id")
+            with RUNS_LOCK:
+                run = RUNS.get(rid)
+                if run is not None:
+                    run["cancel"] = True
+            self._send_json({"ok": run is not None, "run_id": rid})
+            return
         if path == "/api/reload-config":
             global CONFIG
             CONFIG = load_config()
@@ -523,23 +655,52 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 raise
 
+        run_id = uuid.uuid4().hex[:12]
+        with RUNS_LOCK:
+            RUNS[run_id] = {"cancel": False}
+
+        def should_cancel():
+            with RUNS_LOCK:
+                run = RUNS.get(run_id)
+                return bool(run and run["cancel"])
+
+        # total cases up front so the client can show a global progress bar
+        selected = [get_benchmark(b) for b in bench_ids]
+        total_cases = sum(len(b.get("cases", [])) for b in selected if b)
+
         summaries = []
         all_cases = []
+        cancelled = False
         try:
+            emit({"type": "run_started", "run_id": run_id, "model": model,
+                  "total_cases": total_cases, "num_benchmarks": len([b for b in selected if b])})
             for bid in bench_ids:
+                if should_cancel():
+                    cancelled = True
+                    break
                 bench = get_benchmark(bid)
                 if bench is None:
                     emit({"type": "error", "message": f"benchmark {bid} not found"})
                     continue
-                summary, cases = run_benchmark_stream(model, bench, params, emit)
+                summary, cases, was_cancelled = run_benchmark_stream(
+                    model, bench, params, emit, should_cancel)
                 summaries.append(summary)
                 for c in cases:
                     c["benchmark_id"] = bid
                     all_cases.append(c)
-            record = save_result(model, summaries, all_cases, params)
+                if was_cancelled:
+                    cancelled = True
+                    break
+            if cancelled:
+                emit({"type": "stopped", "run_id": run_id})
+            record = save_result(model, summaries, all_cases, params, cancelled=cancelled)
             emit({"type": "saved", "result_id": record["id"],
                   "overall_score": record["overall_score"],
-                  "passed": record["passed"], "total": record["total"]})
+                  "passed": record["passed"], "answered": record["answered"],
+                  "total": record["total"], "cancelled": cancelled,
+                  "total_tokens": record["total_tokens"],
+                  "total_time_s": record["total_time_s"],
+                  "avg_tokens_per_second": record["avg_tokens_per_second"]})
         except (BrokenPipeError, ConnectionResetError):
             return  # client navigated away
         except Exception as e:  # noqa: BLE001
@@ -547,6 +708,9 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"type": "fatal", "message": str(e)})
             except Exception:  # noqa: BLE001
                 pass
+        finally:
+            with RUNS_LOCK:
+                RUNS.pop(run_id, None)
 
 
 def main():

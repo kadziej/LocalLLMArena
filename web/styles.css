@@ -109,8 +109,36 @@ select { flex: 1; }
   padding: 1px 7px; border-radius: 10px; margin-left: 6px;
 }
 
+.hidden { display: none !important; }
+.btn-danger {
+  background: var(--red); color: #fff; border: none; padding: 11px 20px;
+  border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.btn-danger:hover { filter: brightness(1.08); }
+.btn-danger:disabled { opacity: .6; cursor: progress; }
+
 .run-bar { display: flex; align-items: center; gap: 14px; margin: 18px 0; flex-wrap: wrap; }
 .run-status { color: var(--muted); font-size: 13px; }
+
+/* live stats strip */
+.live-stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 16px; }
+.stat-chip {
+  display: flex; flex-direction: column; gap: 2px; min-width: 110px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+}
+.stat-chip .sk { font-size: 11px; color: var(--muted); }
+.stat-chip .sv { font-size: 15px; font-weight: 600; }
+
+/* live "generating" row */
+.case-row.running { background: var(--bg-elev2); }
+.case-row .mark.spin { display: inline-block; animation: spin 0.9s linear infinite; color: var(--accent); }
+@keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+
+/* metric grid in modal / run detail */
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin: 8px 0 16px; }
+.metric { background: var(--bg-elev2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 11px; display: flex; flex-direction: column; gap: 2px; }
+.metric .mk { font-size: 11px; color: var(--muted); }
+.metric .mv { font-size: 14px; font-weight: 600; }
 .progress-wrap { flex: 1; min-width: 120px; height: 6px; background: var(--bg-elev2); border-radius: 4px; overflow: hidden; }
 .progress-bar { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 

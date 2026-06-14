@@ -25,6 +25,24 @@ No `pip install`, no Node, no build step — just Python 3 standard library.
 
 4. Pick a model, tick the benchmarks you want, and click **Run selected**.
    Results stream in live and are saved to `results/` for the History tab.
+   Hit **■ Stop** at any time to cancel mid-run (the partial result is saved).
+
+### Live metrics
+
+Each question is generated via the streaming API, so you see results appear in
+real time along with detailed performance metrics, captured per case and
+aggregated per benchmark and per run:
+
+- **Tokens** — prompt, completion, and total token counts (from the model's usage report)
+- **Speed** — tokens/second (measured over the decode window, with a fall-back
+  for very short outputs)
+- **Time to first token (TTFT)** and **total latency** per question
+- **Total wall-clock time** and **average speed** for the whole run
+- **Finish reason** (e.g. `stop`, `length`)
+
+A live stats strip during the run shows elapsed time, cases done, pass count,
+running token total, and average speed. Click any question row to inspect its
+full prompt, expected answer, model output, and all metrics.
 
 If your LM Studio endpoint differs, edit `lmstudio_base_url` in
 [`config.json`](config.json) and restart (or POST `/api/reload-config`).
@@ -110,6 +128,8 @@ API endpoints (handy if you want to script runs):
 - `GET  /api/benchmarks` — list benchmark metadata
 - `GET  /api/benchmarks/{id}` — full benchmark incl. cases
 - `POST /api/run` — `{ "model", "benchmark_ids": [...], "params": {...} }` → NDJSON stream
+  (first event is `run_started` with a `run_id`)
+- `POST /api/run/stop` — `{ "run_id" }` cancels an in-flight run
 - `GET  /api/results` / `GET /api/results/{id}` — saved runs
 
 ---
