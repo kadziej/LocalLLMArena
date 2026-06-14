@@ -211,10 +211,54 @@ let runAbort = null;
 let statsTimer = null;
 let activeBuffer = "";   // streaming output text for the focal panel
 
-$("#run-btn").addEventListener("click", runSelected);
+$("#run-btn").addEventListener("click", runAll);
 $("#stop-btn").addEventListener("click", stopRun);
+$("#add-to-queue").addEventListener("click", addToQueue);
+
+// ---- model queue ----------------------------------------------------------
+let queueStopped = false;
+let runSeq = 0;
+
+function providerIcon(p) { return p === "openrouter" ? "☁️" : "🖥️"; }
+
+function addToQueue() {
+  const provider = state.provider;
+  const model = $("#model-select").value;
+  if (!model) { alert("No model selected."); return; }
+  if (state.queue.some((t) => t.provider === provider && t.model === model)) return; // dedupe
+  const info = state.modelMap[model] || {};
+  state.queue.push({ provider, model, name: info.name || model });
+  renderQueue();
+}
+
+function removeFromQueue(i) { state.queue.splice(i, 1); renderQueue(); }
+
+function renderQueue() {
+  state.queue = state.queue || [];
+  const el = $("#queue-list");
+  if (!state.queue.length) { el.innerHTML = ""; updateRunButton(); return; }
+  el.innerHTML = `<div class="queue-head">Queue (${state.queue.length})
+      <button id="queue-clear" class="link-btn">clear</button></div>`
+    + state.queue.map((t, i) => `
+      <div class="queue-item">
+        <span class="qi-prov">${providerIcon(t.provider)}</span>
+        <span class="qi-model" title="${escapeHtml(t.model)}">${escapeHtml(t.model)}</span>
+        <button class="qi-remove" data-i="${i}" title="remove">×</button>
+      </div>`).join("");
+  $("#queue-clear").addEventListener("click", () => { state.queue = []; renderQueue(); });
+  el.querySelectorAll(".qi-remove").forEach((b) =>
+    b.addEventListener("click", () => removeFromQueue(parseInt(b.dataset.i, 10))));
+  updateRunButton();
+}
+
+function updateRunButton() {
+  const n = (state.queue || []).length;
+  $("#run-btn").textContent = n > 1 ? `▶ Run queue (${n} models)`
+    : n === 1 ? "▶ Run 1 model" : "▶ Run selected model";
+}
 
 async function stopRun() {
+  queueStopped = true;
   $("#stop-btn").disabled = true;
   $("#stop-btn").textContent = "■ Stopping…";
   if (currentRunId) {
@@ -225,17 +269,25 @@ async function stopRun() {
       });
     } catch (e) { /* ignore */ }
   }
+  if (runAbort) { try { runAbort.abort(); } catch (e) { /* ignore */ } }
 }
 
-async function runSelected() {
+async function runAll() {
   if (running) return;
-  const provider = state.provider;
-  const model = $("#model-select").value;
   const benchmark_ids = $$(".bench-cb").filter((c) => c.checked).map((c) => c.value);
-  if (!model) { alert("No model selected."); return; }
   if (!benchmark_ids.length) { alert("Select at least one benchmark."); return; }
-  if (provider === "openrouter" && state.settings && !state.settings.openrouter_configured) {
-    if (!confirm("No OpenRouter API key is set (Settings tab). The run will likely fail. Continue anyway?")) return;
+
+  // Targets: the queue, or — if empty — the currently selected model.
+  let targets = (state.queue && state.queue.length)
+    ? state.queue.slice()
+    : (() => {
+        const m = $("#model-select").value;
+        return m ? [{ provider: state.provider, model: m }] : [];
+      })();
+  if (!targets.length) { alert("Add a model to the queue, or select one."); return; }
+
+  if (targets.some((t) => t.provider === "openrouter") && state.settings && !state.settings.openrouter_configured) {
+    if (!confirm("The queue includes OpenRouter models but no API key is set (Settings tab). Those runs will fail. Continue anyway?")) return;
   }
 
   const params = {
@@ -244,26 +296,66 @@ async function runSelected() {
   };
 
   running = true;
-  currentRunId = null;
+  queueStopped = false;
   $("#run-btn").classList.add("hidden");
   $("#stop-btn").classList.remove("hidden");
   $("#stop-btn").disabled = false;
   $("#stop-btn").textContent = "■ Stop";
   $("#live-results").innerHTML = "";
-  $("#progress-bar").style.width = "0%";
-  $("#live-stats").classList.remove("hidden");
+  $("#live-stats").classList.add("hidden");
   $("#live-active").classList.add("hidden");
 
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      if (queueStopped) break;
+      await streamOneRun(targets[i], benchmark_ids, params, i, targets.length);
+    }
+    if (queueStopped) {
+      $("#queue-status").innerHTML = `<span class="warn">■ Queue stopped</span>`;
+    } else if (targets.length > 1) {
+      $("#queue-status").innerHTML = `✓ Queue complete — ${targets.length} models. See the <b>Leaderboard</b> to compare.`;
+    }
+  } finally {
+    running = false; currentRunId = null; runAbort = null;
+    $("#run-btn").classList.remove("hidden");
+    $("#stop-btn").classList.add("hidden");
+    $("#live-active").classList.add("hidden");
+  }
+}
+
+// Run a single (provider, model) target; resolves when its run finishes or is
+// cancelled. Each target is saved separately, so each becomes a leaderboard row.
+async function streamOneRun(target, benchmark_ids, params, idx, total) {
+  const { provider, model } = target;
+  const seq = ++runSeq;
+  currentRunId = null;
+  $("#progress-bar").style.width = "0%";
+  $("#live-stats").classList.remove("hidden");
+
+  // per-model section in the results area
+  const section = document.createElement("div");
+  section.className = "model-section";
+  const queueTag = total > 1 ? `<span class="ms-count">model ${idx + 1}/${total}</span>` : "";
+  section.innerHTML = `<div class="model-banner">
+      <span class="ms-prov">${providerIcon(provider)}</span>
+      <span class="ms-model">${escapeHtml(model)}</span>${queueTag}
+      <span class="ms-status" id="msstatus-${seq}">starting…</span>
+    </div><div class="ms-body" id="msbody-${seq}"></div>`;
+  $("#live-results").appendChild(section);
+
   const agg = {
-    startedAt: Date.now(), provider,
+    startedAt: Date.now(), provider, seq,
     totalCases: state.benchmarks.filter((b) => benchmark_ids.includes(b.id)).reduce((a, b) => a + b.count, 0),
     doneCases: 0, passed: 0, completionTokens: 0, promptTokens: 0,
-    tpsSum: 0, tpsN: 0, cost: 0, costKnown: false, finished: false,
+    tpsSum: 0, tpsN: 0, cost: 0, costKnown: false,
   };
+  if (total > 1) $("#queue-status").innerHTML = `Running model <b>${idx + 1}/${total}</b>: ${escapeHtml(model)}`;
   renderLiveStats(agg);
+  clearInterval(statsTimer);
   statsTimer = setInterval(() => renderLiveStats(agg), 250);
 
-  const blocks = {};
+  const ctx = { seq, container: $("#msbody-" + seq), blocks: {}, agg, model, idx, total };
+
   try {
     runAbort = new AbortController();
     const resp = await fetch("/api/run", {
@@ -283,20 +375,17 @@ async function runSelected() {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
-        handleEvent(JSON.parse(line), blocks, agg);
+        handleEvent(JSON.parse(line), ctx);
       }
     }
   } catch (e) {
-    if (!(e && e.name === "AbortError"))
-      $("#run-status").innerHTML = `<span class="warn">Run failed: ${escapeHtml(String(e))}</span>`;
+    if (!(e && e.name === "AbortError")) {
+      const st = $("#msstatus-" + seq);
+      if (st) st.innerHTML = `<span class="warn">failed: ${escapeHtml(String(e))}</span>`;
+    }
   } finally {
-    agg.finished = true;
     clearInterval(statsTimer);
     renderLiveStats(agg);
-    running = false; currentRunId = null; runAbort = null;
-    $("#run-btn").classList.remove("hidden");
-    $("#stop-btn").classList.add("hidden");
-    $("#live-active").classList.add("hidden");
   }
 }
 
@@ -316,37 +405,38 @@ function renderLiveStats(agg) {
     `<div class="stat-chip"><span class="sk">${k}</span><span class="sv">${v}</span></div>`).join("");
 }
 
-function handleEvent(ev, blocks, agg) {
+function handleEvent(ev, ctx) {
+  const { seq, agg, blocks } = ctx;
   switch (ev.type) {
     case "run_started":
       currentRunId = ev.run_id;
       if (ev.total_cases) agg.totalCases = ev.total_cases;
-      $("#run-status").textContent = "running…";
       break;
     case "start": {
-      const id = ev.benchmark_id;
       const wrap = document.createElement("div");
       wrap.className = "result-block";
       wrap.innerHTML = `
         <div class="result-head">
-          <div class="score-badge" id="badge-${id}">…</div>
+          <div class="score-badge" id="badge-${seq}-${ev.benchmark_id}">…</div>
           <div class="rh-name">${escapeHtml(ev.benchmark_name)}</div>
-          <div class="rh-meta" id="meta-${id}">0 / ${ev.total}</div>
+          <div class="rh-meta" id="meta-${seq}-${ev.benchmark_id}">0 / ${ev.total}</div>
         </div>
-        <div class="case-table" id="table-${id}"></div>`;
-      $("#live-results").appendChild(wrap);
-      blocks[id] = { passed: 0, seen: 0, total: ev.total };
+        <div class="case-table" id="table-${seq}-${ev.benchmark_id}"></div>`;
+      ctx.container.appendChild(wrap);
+      blocks[ev.benchmark_id] = { passed: 0, seen: 0, total: ev.total };
       break;
     }
     case "case_start": {
       // focal panel: show the prompt going in, reset the streaming output area
       activeBuffer = "";
       $("#live-active").classList.remove("hidden");
-      $("#la-head").textContent = `${ev.benchmark_id} · case ${ev.index + 1} / ${ev.total} · generating…`;
+      const who = ctx.total > 1 ? `${ctx.model} · ` : "";
+      $("#la-head").textContent = `${who}${ev.benchmark_id} · case ${ev.index + 1} / ${ev.total} · generating…`;
       $("#la-prompt").textContent = ev.prompt;
       $("#la-output").innerHTML = `<span id="la-text"></span><span class="cursor">▋</span>`;
       $("#la-toks").textContent = "";
-      $("#run-status").textContent = `running case ${ev.index + 1} / ${ev.total}…`;
+      const st = $("#msstatus-" + seq);
+      if (st) st.textContent = `running case ${ev.index + 1} / ${ev.total}…`;
       break;
     }
     case "token": {
@@ -365,9 +455,9 @@ function handleEvent(ev, blocks, agg) {
       if (blk) {
         blk.seen++;
         if (ev.result.passed) blk.passed++;
-        const table = $("#table-" + bid);
+        const table = $(`#table-${seq}-${bid}`);
         if (table) table.appendChild(renderCaseRow(ev.result));
-        const meta = $("#meta-" + bid);
+        const meta = $(`#meta-${seq}-${bid}`);
         if (meta) meta.textContent = `${blk.passed} / ${blk.total}`;
       }
       agg.doneCases++;
@@ -381,28 +471,33 @@ function handleEvent(ev, blocks, agg) {
       break;
     }
     case "done": {
-      const badge = $("#badge-" + ev.benchmark_id);
+      const badge = $(`#badge-${seq}-${ev.benchmark_id}`);
       if (badge) { badge.textContent = ev.score + "%"; badge.className = "score-badge " + scoreClass(ev.score); }
-      const meta = $("#meta-" + ev.benchmark_id);
+      const meta = $(`#meta-${seq}-${ev.benchmark_id}`);
       if (meta) meta.innerHTML = benchMetaLine(ev);
       break;
     }
-    case "stopped":
-      $("#run-status").innerHTML = `<span class="warn">■ Stopped by user</span>`;
+    case "stopped": {
+      const st = $("#msstatus-" + seq);
+      if (st) st.innerHTML = `<span class="warn">■ stopped</span>`;
       break;
+    }
     case "saved": {
       const tail = ev.cancelled ? "stopped · partial saved" : "done · saved";
-      let s = `${tail} — ${ev.passed}/${ev.answered ?? ev.total} passed · `
-        + `${(ev.total_tokens || 0).toLocaleString()} tokens · ${fmtDur(ev.total_time_s)}`;
+      let s = `${tail} — ${ev.passed}/${ev.answered ?? ev.total} · `
+        + `${(ev.total_tokens || 0).toLocaleString()} tok · ${fmtDur(ev.total_time_s)}`;
       if (ev.avg_tokens_per_second) s += ` · ${ev.avg_tokens_per_second} tok/s`;
       if (ev.total_cost_usd != null) s += ` · ${fmtCost(ev.total_cost_usd)}`;
-      $("#run-status").innerHTML = s;
+      const st = $("#msstatus-" + seq);
+      if (st) st.innerHTML = s;
       if (!ev.cancelled) $("#progress-bar").style.width = "100%";
       break;
     }
-    case "fatal":
-      $("#run-status").innerHTML = `<span class="warn">Error: ${escapeHtml(ev.message)}</span>`;
+    case "fatal": {
+      const st = $("#msstatus-" + seq);
+      if (st) st.innerHTML = `<span class="warn">Error: ${escapeHtml(ev.message)}</span>`;
       break;
+    }
   }
 }
 
@@ -553,6 +648,8 @@ $("#refresh-benchmarks").addEventListener("click", loadBenchmarkDetails);
 
 // ---- init -----------------------------------------------------------------
 (async function init() {
+  state.queue = [];
+  renderQueue();
   await loadSettings();
   loadModels(state.provider);
   loadBenchmarks();

@@ -45,6 +45,12 @@
         <select id="model-select" size="7"></select>
         <div id="model-info" class="model-info"></div>
 
+        <div class="row" style="margin-top:10px; gap:8px;">
+          <button id="add-to-queue" class="btn-secondary">➕ Add to queue</button>
+          <span class="param-help" style="margin:0">Queue several models (local and/or OpenRouter) to benchmark in sequence and compare.</span>
+        </div>
+        <div id="queue-list" class="queue-list"></div>
+
         <div class="params">
           <label>
             <span class="param-name">Temperature <span class="info" title="Controls randomness of the model's sampling. 0 = deterministic / greedy decoding — the model always picks the most likely next token, giving reproducible answers (best for benchmarking). Higher values (0.7–1.0) make output more varied and creative but less repeatable; very high (&gt;1.2) can become incoherent.">ⓘ</span></span>
@@ -72,9 +78,9 @@
     </div>
 
     <div class="run-bar">
-      <button id="run-btn" class="btn-primary">▶ Run selected</button>
+      <button id="run-btn" class="btn-primary">▶ Run selected model</button>
       <button id="stop-btn" class="btn-danger hidden">■ Stop</button>
-      <span id="run-status" class="run-status"></span>
+      <span id="queue-status" class="run-status"></span>
       <div class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
     </div>
 

@@ -55,12 +55,22 @@ Detailed metrics are captured per case and aggregated per benchmark and per run:
 Click any question row to inspect its full prompt, expected answer, model
 output, and all metrics.
 
+### Queue several models
+
+Use **➕ Add to queue** to line up multiple models — any mix of local (LM Studio)
+and OpenRouter — and benchmark them one after another in a single click. The
+selected benchmarks and parameters apply to every model in the queue, each model
+runs in its own live section, and each is saved as its own leaderboard row.
+**■ Stop** halts the whole queue (the current model finishes its current question,
+remaining models are skipped). If the queue is empty, the Run button just runs
+the single model currently selected.
+
 ### Comparing models (leaderboard)
 
 Every run is saved and listed on the **Leaderboard** tab as a sortable table:
-score, model, provider, speed (tok/s), cost, total time, and pass count. Run the
-same benchmarks against a local model and an OpenRouter model to compare quality
-vs. speed vs. price directly.
+score, model, provider, speed (tok/s), cost, total time, and pass count. Queue a
+local model and an OpenRouter model together to compare quality vs. speed vs.
+price directly, side by side.
 
 ### Configuration
 
