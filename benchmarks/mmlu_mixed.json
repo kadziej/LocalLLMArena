@@ -1,0 +1,23 @@
+{
+  "id": "mmlu_mixed",
+  "name": "MMLU (Mixed Subjects)",
+  "category": "Knowledge",
+  "description": "Multiple-choice questions across several academic subjects (MMLU style). Scored by extracting the chosen letter A-D.",
+  "scoring": "multiple_choice",
+  "system_prompt": "Answer the multiple choice question. Respond with the single correct letter, ending with 'Answer: <letter>'.",
+  "default_params": { "temperature": 0, "max_tokens": 512 },
+  "cases": [
+    { "id": "hs_math", "prompt": "(High school mathematics) If 3x + 7 = 22, what is the value of x?\nA) 3\nB) 5\nC) 7\nD) 15", "expected": "B" },
+    { "id": "physics", "prompt": "(Conceptual physics) Which of the following is a vector quantity?\nA) Mass\nB) Temperature\nC) Velocity\nD) Energy", "expected": "C" },
+    { "id": "biology", "prompt": "(High school biology) In which organelle does cellular respiration primarily produce ATP?\nA) Nucleus\nB) Ribosome\nC) Mitochondrion\nD) Golgi apparatus", "expected": "C" },
+    { "id": "chemistry", "prompt": "(High school chemistry) What is the pH of a neutral aqueous solution at 25 degrees Celsius?\nA) 0\nB) 7\nC) 14\nD) 1", "expected": "B" },
+    { "id": "us_history", "prompt": "(US history) The Declaration of Independence was adopted in which year?\nA) 1492\nB) 1776\nC) 1812\nD) 1865", "expected": "B" },
+    { "id": "geography", "prompt": "(World geography) Which river is the longest in the world?\nA) Amazon\nB) Yangtze\nC) Mississippi\nD) Nile", "expected": "D" },
+    { "id": "cs", "prompt": "(College computer science) What is the time complexity of binary search on a sorted array of n elements?\nA) O(n)\nB) O(n log n)\nC) O(log n)\nD) O(1)", "expected": "C" },
+    { "id": "econ", "prompt": "(High school macroeconomics) If a central bank raises interest rates, what is the most likely short-term effect?\nA) Increased borrowing and spending\nB) Reduced borrowing and spending\nC) Higher inflation immediately\nD) No effect on the economy", "expected": "B" },
+    { "id": "philosophy", "prompt": "(Philosophy) Which philosopher is most associated with the categorical imperative?\nA) David Hume\nB) John Stuart Mill\nC) Immanuel Kant\nD) Friedrich Nietzsche", "expected": "C" },
+    { "id": "anatomy", "prompt": "(Anatomy) Which blood vessels carry blood away from the heart?\nA) Veins\nB) Arteries\nC) Capillaries\nD) Venules", "expected": "B" },
+    { "id": "astronomy", "prompt": "(Astronomy) Which planet in our solar system has the most moons discovered to date?\nA) Earth\nB) Mars\nC) Saturn\nD) Mercury", "expected": "C" },
+    { "id": "logic", "prompt": "(Formal logic) If all roses are flowers and some flowers fade quickly, which statement must be true?\nA) All roses fade quickly\nB) Some roses fade quickly\nC) No roses fade quickly\nD) None of the above must be true", "expected": "D" }
+  ]
+}

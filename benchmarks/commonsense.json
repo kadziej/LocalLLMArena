@@ -1,0 +1,22 @@
+{
+  "id": "commonsense",
+  "name": "Commonsense Reasoning",
+  "category": "Reasoning",
+  "description": "Everyday commonsense multiple-choice questions (CommonsenseQA / HellaSwag style). Scored by chosen letter.",
+  "scoring": "multiple_choice",
+  "system_prompt": "Pick the most sensible answer. End with 'Answer: <letter>'.",
+  "default_params": { "temperature": 0, "max_tokens": 512 },
+  "cases": [
+    { "id": "q1", "prompt": "Where would you most likely find a book that you can borrow for free?\nA) bookstore\nB) library\nC) supermarket\nD) bakery", "expected": "B" },
+    { "id": "q2", "prompt": "A person is shivering and their lips are blue. They are most likely feeling\nA) hot\nB) cold\nC) hungry\nD) sleepy", "expected": "B" },
+    { "id": "q3", "prompt": "You want to keep your ice cream from melting on a hot day. What should you do?\nA) leave it in the sun\nB) put it in the freezer\nC) place it next to the oven\nD) hold it in your warm hands", "expected": "B" },
+    { "id": "q4", "prompt": "A man is cutting onions and his eyes start to water. The most likely reason is\nA) he is very sad\nB) chemicals released by the onion irritate his eyes\nC) the kitchen is too bright\nD) he is allergic to knives", "expected": "B" },
+    { "id": "q5", "prompt": "If you drop a glass cup on a tile floor, what is most likely to happen?\nA) it will bounce\nB) it will shatter\nC) it will float\nD) nothing happens", "expected": "B" },
+    { "id": "q6", "prompt": "Someone is yawning repeatedly during a long meeting. They are most likely\nA) excited\nB) tired or bored\nC) angry\nD) hungry", "expected": "B" },
+    { "id": "q7", "prompt": "You hear thunder and see dark clouds. What should you bring if you go outside?\nA) sunglasses only\nB) an umbrella\nC) a beach towel\nD) sunscreen", "expected": "B" },
+    { "id": "q8", "prompt": "A child puts a metal spoon in hot soup and leaves it there. After a while the handle of the spoon will be\nA) frozen\nB) warm\nC) unchanged\nD) wet", "expected": "B" },
+    { "id": "q9", "prompt": "To find out what time it is, you would most naturally look at a\nA) thermometer\nB) clock\nC) calendar\nD) ruler", "expected": "B" },
+    { "id": "q10", "prompt": "John finished a marathon. Immediately afterward he would most likely want to\nA) run another marathon at full speed\nB) drink water and rest\nC) eat nothing for two days\nD) lift the heaviest weights he can", "expected": "B" },
+    { "id": "q11", "prompt": "A plant on a windowsill is leaning toward the window. This is most likely because\nA) it is growing toward the light\nB) the window is pushing it\nC) it dislikes the room\nD) someone bent it", "expected": "A" }
+  ]
+}

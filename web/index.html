@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LocalLLMArena</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏟️</text></svg>" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">🏟️</span>
+      <div>
+        <h1>LocalLLMArena</h1>
+        <span class="subtitle">Benchmark your local LLMs via LM Studio</span>
+      </div>
+    </div>
+    <div class="endpoint">
+      <span class="dot" id="status-dot"></span>
+      <span id="endpoint-label">connecting…</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="run">Run</button>
+    <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="benchmarks">Benchmarks</button>
+  </nav>
+
+  <!-- RUN TAB -->
+  <section id="tab-run" class="tab-panel active">
+    <div class="config-grid">
+      <div class="card">
+        <label class="field-label">Model</label>
+        <div class="row">
+          <select id="model-select"></select>
+          <button id="refresh-models" class="btn-secondary" title="Reload model list">↻</button>
+        </div>
+        <div class="params">
+          <label>Temperature
+            <input type="number" id="param-temp" value="0" step="0.1" min="0" max="2" />
+          </label>
+          <label>Max tokens
+            <input type="number" id="param-maxtok" value="1024" step="64" min="16" />
+          </label>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row between">
+          <label class="field-label">Benchmarks</label>
+          <div class="mini-actions">
+            <button id="select-all" class="link-btn">all</button>
+            <button id="select-none" class="link-btn">none</button>
+          </div>
+        </div>
+        <div id="benchmark-list" class="benchmark-list"></div>
+      </div>
+    </div>
+
+    <div class="run-bar">
+      <button id="run-btn" class="btn-primary">▶ Run selected</button>
+      <span id="run-status" class="run-status"></span>
+      <div class="progress-wrap"><div id="progress-bar" class="progress-bar"></div></div>
+    </div>
+
+    <div id="live-results"></div>
+  </section>
+
+  <!-- HISTORY TAB -->
+  <section id="tab-history" class="tab-panel">
+    <div class="card">
+      <div class="row between">
+        <h2>Past runs</h2>
+        <button id="refresh-history" class="btn-secondary">↻ Refresh</button>
+      </div>
+      <div id="history-list"></div>
+    </div>
+    <div id="history-detail"></div>
+  </section>
+
+  <!-- BENCHMARKS TAB -->
+  <section id="tab-benchmarks" class="tab-panel">
+    <div class="card">
+      <h2>Available benchmarks</h2>
+      <p class="muted">Each benchmark is a JSON file in the <code>benchmarks/</code> folder. Add your own by dropping a new file there (see the README for the format), then click Refresh.</p>
+      <button id="refresh-benchmarks" class="btn-secondary">↻ Refresh</button>
+      <div id="benchmarks-detail"></div>
+    </div>
+  </section>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <button class="modal-close" id="modal-close">×</button>
+      <div id="modal-content"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{
+  "id": "hidden_premise",
+  "name": "Hidden-Premise Reasoning (Walk or Drive?)",
+  "category": "Reasoning",
+  "description": "Errand decisions where a naive heuristic (short distance -> walk) conflicts with the real goal. Some errands REQUIRE the car to be physically present (car wash, tire fitting) or need its capacity/payload; others genuinely don't. Mixed answers prevent gaming by always choosing 'drive'. Scored by chosen letter.",
+  "scoring": "multiple_choice",
+  "system_prompt": "You are deciding how to run an errand. Think carefully about the actual purpose of the errand. Briefly justify your choice, then end with a line 'Answer: <letter>'.",
+  "default_params": { "temperature": 0, "max_tokens": 512 },
+  "cases": [
+    { "id": "carwash", "prompt": "The car wash is 100 meters away. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "The car itself must be at the car wash to be cleaned." },
+    { "id": "newspaper", "prompt": "The kiosk that sells newspapers is 100 meters away and I just want to buy a newspaper. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "A", "rationale": "Control: nothing about the errand needs the car." },
+    { "id": "tires", "prompt": "The tire shop is 300 meters away and I need four new tires fitted to my car today. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "The car must be present to have tires fitted." },
+    { "id": "coffee", "prompt": "A cafe 120 meters away makes great coffee and I'd like one for myself. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "A", "rationale": "Control: a short personal errand, no car needed." },
+    { "id": "oil", "prompt": "The garage that does oil changes is 250 meters away and my car is due for an oil change. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "The car needs to be at the garage." },
+    { "id": "letter", "prompt": "The post box is 80 meters away and I just need to drop in a single small letter. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "A", "rationale": "Control: trivial item, no car needed." },
+    { "id": "kids", "prompt": "School is 600 meters away and I need to pick up my three young children along with their backpacks and a class project poster. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "Capacity: several children plus bulky items." },
+    { "id": "inspection", "prompt": "The vehicle inspection station is 500 meters away and my car is due for its annual roadworthiness test. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "The car must be inspected, so it must be there." },
+    { "id": "friend", "prompt": "My friend's house is 150 meters away and I'm popping over to chat for an hour. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "A", "rationale": "Control: social visit, nothing to transport." },
+    { "id": "tv", "prompt": "The electronics store is 200 meters away and I'm going to buy a large 65-inch television to bring home. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "Payload: the TV must be transported home." },
+    { "id": "charge", "prompt": "An EV charging station is 150 meters away and my electric car's battery is nearly empty. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "The car is what needs charging." },
+    { "id": "stroll", "prompt": "There is a park bench 100 meters away and I'd like to sit outside and get some fresh air. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "A", "rationale": "Control: the goal is fresh air/a short walk." },
+    { "id": "soil", "prompt": "The garden center is 400 meters away and I'm picking up six 25-kilogram bags of soil for my garden. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "Payload: 150 kg of soil must be transported." },
+    { "id": "noise", "prompt": "The mechanic is 250 meters away and I want him to hear the strange grinding noise my car makes while driving. Should I walk or drive?\nA) Walk\nB) Drive", "expected": "B", "rationale": "The car must be driven for the mechanic to hear the noise." }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "id": "instruction_following",
+  "name": "Instruction Following",
+  "category": "Instruction Following",
+  "description": "Tests whether the model obeys precise output-format instructions (IFEval style). Scored with regular expressions over the raw output.",
+  "scoring": "regex",
+  "default_params": { "temperature": 0, "max_tokens": 600 },
+  "cases": [
+    { "id": "json_only", "prompt": "Respond with ONLY a JSON object with keys \"name\" and \"age\" for a person named Alice who is 30. No other text.", "expected": "^\\s*\\{[^}]*\"name\"\\s*:\\s*\"alice\"[^}]*\"age\"\\s*:\\s*30[^}]*\\}\\s*$" },
+    { "id": "uppercase", "prompt": "Reply with the word 'banana' in all uppercase letters and nothing else.", "expected": "^\\s*BANANA\\s*$" },
+    { "id": "three_words", "prompt": "List exactly three fruits, comma separated, lowercase, no other words, no trailing punctuation.", "expected": "^\\s*[a-z]+\\s*,\\s*[a-z]+\\s*,\\s*[a-z]+\\s*$" },
+    { "id": "no_letter_e", "prompt": "Write a single sentence about the sky that does not contain the letter 'e'. Output only the sentence.", "expected": "^[^eE\\n]*[.!?]?\\s*$" },
+    { "id": "exact_phrase", "prompt": "End your response with the exact phrase: DONE-42 . You may say anything before it.", "expected": "DONE-42\\s*$" },
+    { "id": "bullet_count", "prompt": "Give exactly two bullet points (lines starting with '- ') about cats. No introduction, no conclusion.", "expected": "^\\s*-\\s+.+\\n-\\s+.+\\s*$" },
+    { "id": "yes_no", "prompt": "Is the sky blue on a clear day? Answer with exactly one word: Yes or No.", "expected": "^\\s*(yes|no)\\s*$" },
+    { "id": "word_count", "prompt": "Write a sentence about dogs using exactly five words. Output only the sentence.", "expected": "^\\s*(\\S+\\s+){4}\\S+\\s*[.!?]?\\s*$" },
+    { "id": "start_with", "prompt": "Write one sentence that begins with the word 'Today'. Output only that sentence.", "expected": "^\\s*Today\\b" },
+    { "id": "number_list", "prompt": "Output the numbers 1 to 5, each on its own line, with nothing else.", "expected": "^\\s*1\\s*\\n2\\s*\\n3\\s*\\n4\\s*\\n5\\s*$" }
+  ]
+}

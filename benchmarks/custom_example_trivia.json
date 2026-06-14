@@ -1,0 +1,16 @@
+{
+  "id": "custom_example_trivia",
+  "name": "Custom Example — World Capitals",
+  "category": "Custom",
+  "description": "A tiny example showing how to add your own benchmark. Copy this file, edit the cases, and it appears in the app automatically. Uses 'contains' scoring (pass if the answer text contains the expected string).",
+  "scoring": "contains",
+  "system_prompt": "Answer concisely with just the name.",
+  "default_params": { "temperature": 0, "max_tokens": 128 },
+  "cases": [
+    { "id": "q1", "prompt": "What is the capital of France?", "expected": "Paris" },
+    { "id": "q2", "prompt": "What is the capital of Japan?", "expected": "Tokyo" },
+    { "id": "q3", "prompt": "What is the capital of Australia?", "expected": "Canberra" },
+    { "id": "q4", "prompt": "What is the capital of Poland?", "expected": "Warsaw" },
+    { "id": "q5", "prompt": "What is the capital of Brazil?", "expected": ["Brasilia", "Brasília"] }
+  ]
+}

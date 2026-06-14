@@ -1,0 +1,21 @@
+{
+  "id": "code_reasoning",
+  "name": "Code Output Prediction",
+  "category": "Coding",
+  "description": "Predict the exact output of short Python snippets. Scored by checking the model's final answer contains the correct output (no code execution needed).",
+  "scoring": "contains",
+  "system_prompt": "Trace through the code carefully and state the exact output. End your reply with a line 'Answer: <output>'.",
+  "default_params": { "temperature": 0, "max_tokens": 800 },
+  "cases": [
+    { "id": "q1", "prompt": "What is the output?\n\n```python\nprint(len([x for x in range(10) if x % 2 == 0]))\n```", "expected": "5" },
+    { "id": "q2", "prompt": "What is the output?\n\n```python\na = [1, 2, 3]\nb = a\nb.append(4)\nprint(len(a))\n```", "expected": "4" },
+    { "id": "q3", "prompt": "What is the output?\n\n```python\nprint('ab' * 3)\n```", "expected": "ababab" },
+    { "id": "q4", "prompt": "What is the output?\n\n```python\nd = {'x': 1, 'y': 2}\nprint(sum(d.values()))\n```", "expected": "3" },
+    { "id": "q5", "prompt": "What is the output?\n\n```python\ns = 'hello world'\nprint(s.split()[1][::-1])\n```", "expected": "dlrow" },
+    { "id": "q6", "prompt": "What is the output?\n\n```python\nx = 5\ny = x\nx = 10\nprint(y)\n```", "expected": "5" },
+    { "id": "q7", "prompt": "What is the output?\n\n```python\nprint(list(range(2, 11, 3)))\n```", "expected": ["2, 5, 8", "[2, 5, 8]"] },
+    { "id": "q8", "prompt": "What is the output?\n\n```python\ndef f(n):\n    if n <= 1:\n        return 1\n    return n * f(n - 1)\nprint(f(4))\n```", "expected": "24" },
+    { "id": "q9", "prompt": "What is the output?\n\n```python\nprint(sorted([3, 1, 2], reverse=True))\n```", "expected": ["3, 2, 1", "[3, 2, 1]"] },
+    { "id": "q10", "prompt": "What is the output?\n\n```python\nprint(10 // 3, 10 % 3)\n```", "expected": "3 1" }
+  ]
+}

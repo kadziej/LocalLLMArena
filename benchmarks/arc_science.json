@@ -1,0 +1,22 @@
+{
+  "id": "arc_science",
+  "name": "ARC (Science Reasoning)",
+  "category": "Knowledge",
+  "description": "Grade-school science questions requiring reasoning (AI2 ARC style). Multiple choice, scored by chosen letter.",
+  "scoring": "multiple_choice",
+  "system_prompt": "Answer the multiple choice science question. End with 'Answer: <letter>'.",
+  "default_params": { "temperature": 0, "max_tokens": 512 },
+  "cases": [
+    { "id": "q1", "prompt": "Which property of a mineral can be determined just by looking at it?\nA) luster\nB) mass\nC) weight\nD) hardness", "expected": "A" },
+    { "id": "q2", "prompt": "A student wants to find out whether plants grow taller in sunlight or in shade. Which is the variable the student should change between the two groups of plants?\nA) the type of plant\nB) the amount of light\nC) the size of the pot\nD) the amount of water", "expected": "B" },
+    { "id": "q3", "prompt": "Which of these is the best example of a physical change?\nA) iron rusting\nB) wood burning\nC) ice melting\nD) milk souring", "expected": "C" },
+    { "id": "q4", "prompt": "An animal that eats only other animals is called a\nA) producer\nB) herbivore\nC) carnivore\nD) decomposer", "expected": "C" },
+    { "id": "q5", "prompt": "Which of the following best explains why we experience day and night on Earth?\nA) Earth's revolution around the Sun\nB) Earth's rotation on its axis\nC) The Moon blocking the Sun\nD) Changes in the seasons", "expected": "B" },
+    { "id": "q6", "prompt": "Which energy transformation occurs in a solar panel?\nA) heat to light\nB) light to electrical\nC) electrical to chemical\nD) sound to electrical", "expected": "B" },
+    { "id": "q7", "prompt": "A nail is attracted to a magnet. This shows that the nail is most likely made of\nA) plastic\nB) copper\nC) iron\nD) glass", "expected": "C" },
+    { "id": "q8", "prompt": "Which part of a plant absorbs water and minerals from the soil?\nA) leaves\nB) flower\nC) stem\nD) roots", "expected": "D" },
+    { "id": "q9", "prompt": "Sound cannot travel through which of the following?\nA) air\nB) water\nC) steel\nD) a vacuum", "expected": "D" },
+    { "id": "q10", "prompt": "Which gas do plants take in from the atmosphere to perform photosynthesis?\nA) oxygen\nB) nitrogen\nC) carbon dioxide\nD) hydrogen", "expected": "C" },
+    { "id": "q11", "prompt": "A ball is dropped from a height. As it falls, its potential energy is mainly converted to\nA) chemical energy\nB) kinetic energy\nC) nuclear energy\nD) light energy", "expected": "B" }
+  ]
+}

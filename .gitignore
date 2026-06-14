@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# Saved benchmark runs (local, generated at runtime)
+results/*.json
+
+# OS / editor cruft
+.DS_Store
