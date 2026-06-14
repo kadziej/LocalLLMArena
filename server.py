@@ -28,9 +28,38 @@ WEB_DIR = os.path.join(ROOT, "web")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 
 
+LOCAL_SETTINGS_PATH = os.path.join(ROOT, "settings.local.json")
+
+
 def load_config():
+    """Load config.json, then overlay the gitignored settings.local.json so
+    machine-specific values (LM Studio URL, OpenRouter key) stay off GitHub."""
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    if os.path.isfile(LOCAL_SETTINGS_PATH):
+        try:
+            with open(LOCAL_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                local = json.load(f)
+            for k, v in (local or {}).items():
+                cfg[k] = v
+        except (OSError, json.JSONDecodeError):
+            pass
+    return cfg
+
+
+def save_local_settings(updates):
+    current = {}
+    if os.path.isfile(LOCAL_SETTINGS_PATH):
+        try:
+            with open(LOCAL_SETTINGS_PATH, "r", encoding="utf-8") as f:
+                current = json.load(f) or {}
+        except (OSError, json.JSONDecodeError):
+            current = {}
+    for k, v in updates.items():
+        current[k] = v
+    with open(LOCAL_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2)
+    return current
 
 
 CONFIG = load_config()
@@ -41,36 +70,74 @@ RUNS_LOCK = threading.Lock()
 
 
 # --------------------------------------------------------------------------- #
-#  LM Studio client (OpenAI-compatible Chat Completions API)
+#  Provider clients (OpenAI-compatible Chat Completions API)
+#  "local"      -> LM Studio (or any local OpenAI-compatible server)
+#  "openrouter" -> https://openrouter.ai  (cloud, for comparison)
 # --------------------------------------------------------------------------- #
-def lmstudio_url(path):
-    base = CONFIG["lmstudio_base_url"].rstrip("/")
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+
+
+def provider_base_url(provider):
+    if provider == "openrouter":
+        return OPENROUTER_BASE
+    base = (CONFIG.get("lmstudio_base_url") or "http://localhost:1234").rstrip("/")
     if not base.endswith("/v1"):
         base = base + "/v1"
-    return base + path
+    return base
 
 
-def http_json(method, url, payload=None, timeout=60):
+def provider_headers(provider):
+    h = {"Content-Type": "application/json"}
+    if provider == "openrouter":
+        key = CONFIG.get("openrouter_api_key")
+        if key:
+            h["Authorization"] = "Bearer " + key
+        # OpenRouter asks apps to identify themselves.
+        h["HTTP-Referer"] = "https://github.com/kadziej/LocalLLMArena"
+        h["X-Title"] = "LocalLLMArena"
+    return h
+
+
+def http_json(method, url, headers=None, payload=None, timeout=60):
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Content-Type", "application/json")
+    for k, v in (headers or {"Content-Type": "application/json"}).items():
+        req.add_header(k, v)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def list_models():
+def list_models(provider="local"):
+    """Return models for a provider. For OpenRouter, include pricing (USD per
+    token) and context length so the UI can show and compare cost."""
     try:
-        data = http_json("GET", lmstudio_url("/models"), timeout=15)
-        models = [m.get("id") for m in data.get("data", []) if m.get("id")]
-        return {"ok": True, "models": models}
+        url = provider_base_url(provider) + "/models"
+        data = http_json("GET", url, headers=provider_headers(provider), timeout=25)
+        models = []
+        for m in data.get("data", []):
+            mid = m.get("id")
+            if not mid:
+                continue
+            entry = {"id": mid, "name": m.get("name") or mid}
+            pricing = m.get("pricing") or {}
+            try:
+                entry["prompt_price"] = float(pricing.get("prompt") or 0) or 0.0
+                entry["completion_price"] = float(pricing.get("completion") or 0) or 0.0
+            except (TypeError, ValueError):
+                pass
+            if m.get("context_length"):
+                entry["context_length"] = m["context_length"]
+            models.append(entry)
+        models.sort(key=lambda x: x["id"].lower())
+        return {"ok": True, "provider": provider, "models": models}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e), "models": []}
+        return {"ok": False, "provider": provider, "error": str(e), "models": []}
 
 
-def chat_completion(model, messages, params, should_cancel=None, on_progress=None):
-    """Call the streaming chat-completions API and collect rich timing/token
-    metrics. `should_cancel()` is polled between chunks to allow instant stop;
-    `on_progress(partial_text, token_count)` is called as tokens arrive."""
+def chat_completion(provider, model, messages, params, should_cancel=None, on_token=None):
+    """Call the streaming chat-completions API for `provider` and collect rich
+    timing/token/cost metrics. `should_cancel()` is polled between chunks to
+    allow instant stop; `on_token(piece, count)` is called for each token."""
     payload = {
         "model": model,
         "messages": messages,
@@ -81,11 +148,17 @@ def chat_completion(model, messages, params, should_cancel=None, on_progress=Non
     }
     if "top_p" in params:
         payload["top_p"] = params["top_p"]
+    if provider == "openrouter":
+        # Ask OpenRouter to report the exact USD cost in the usage object.
+        payload["usage"] = {"include": True}
 
     data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(lmstudio_url("/chat/completions"), data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "text/event-stream")
+    req = urllib.request.Request(
+        provider_base_url(provider) + "/chat/completions", data=data, method="POST")
+    headers = provider_headers(provider)
+    headers["Accept"] = "text/event-stream"
+    for k, v in headers.items():
+        req.add_header(k, v)
 
     t0 = time.time()
     ttft = None
@@ -103,7 +176,7 @@ def chat_completion(model, messages, params, should_cancel=None, on_progress=Non
                 break
             line = raw.decode("utf-8", "replace").strip()
             if not line or not line.startswith("data:"):
-                continue
+                continue  # ignore SSE comments / keep-alives
             chunk = line[len("data:"):].strip()
             if chunk == "[DONE]":
                 break
@@ -121,8 +194,8 @@ def chat_completion(model, messages, params, should_cancel=None, on_progress=Non
                         ttft = time.time() - t0
                     parts.append(piece)
                     chunk_tokens += 1
-                    if on_progress:
-                        on_progress("".join(parts), chunk_tokens)
+                    if on_token:
+                        on_token(piece, chunk_tokens)
                 if ch.get("finish_reason"):
                     finish_reason = ch["finish_reason"]
 
@@ -134,6 +207,11 @@ def chat_completion(model, messages, params, should_cancel=None, on_progress=Non
     total_tokens = usage.get("total_tokens")
     if total_tokens is None and completion_tokens is not None and prompt_tokens is not None:
         total_tokens = completion_tokens + prompt_tokens
+
+    # Cost: OpenRouter reports exact USD in usage.cost; local models are free.
+    cost = usage.get("cost")
+    if cost is None and provider == "local":
+        cost = 0.0
 
     # tokens/sec over the decode window (first token -> last token), the figure
     # people usually quote. For very short or buffered outputs the window can be
@@ -156,6 +234,7 @@ def chat_completion(model, messages, params, should_cancel=None, on_progress=Non
         "prompt_tokens": prompt_tokens,
         "total_tokens": total_tokens,
         "tokens_per_second": round(tps, 1) if tps is not None else None,
+        "cost_usd": cost,
         "finish_reason": finish_reason,
         "cancelled": cancelled,
     }
@@ -212,18 +291,18 @@ def extract_number(text):
     if not text:
         return None
     cleaned = text.replace("$", "").replace("%", "")
-    # Prefer a number that follows an explicit answer marker.
-    m = re.search(
-        r"(?:answer|=|is|total|result)\D{0,10}?(-?\d[\d,]*\.?\d*)",
-        cleaned,
-        re.IGNORECASE,
-    )
-    candidates = NUMBER_RE.findall(cleaned)
-    raw = None
-    if m:
-        raw = m.group(1)
-    elif candidates:
-        raw = candidates[-1]
+    # Prefer the number after the LAST explicit "Answer" marker (models reason
+    # first, then state the final answer). Taking the last match avoids grabbing
+    # an intermediate number from phrases like "...half of 48 is 24...".
+    ans = list(re.finditer(
+        r"answer\D{0,15}?(-?\d[\d,]*\.?\d*)", cleaned, re.IGNORECASE))
+    if ans:
+        raw = ans[-1].group(1)
+    else:
+        # Otherwise fall back to the last number in the text, which is almost
+        # always the final computed result.
+        candidates = NUMBER_RE.findall(cleaned)
+        raw = candidates[-1] if candidates else None
     if raw is None:
         return None
     try:
@@ -336,7 +415,7 @@ def _avg(xs):
     return round(sum(xs) / len(xs), 3) if xs else None
 
 
-def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
+def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=None):
     """emit(dict) pushes one NDJSON event to the client.
     Returns (summary, case_results, cancelled)."""
     cases = bench.get("cases", [])
@@ -345,6 +424,8 @@ def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
     latencies, ttfts, tps_list = [], [], []
     comp_tokens_sum = 0
     prompt_tokens_sum = 0
+    cost_sum = 0.0
+    cost_known = False
     case_results = []
     cancelled = False
     emit({"type": "start", "benchmark_id": bench["id"],
@@ -360,9 +441,15 @@ def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
         merged = dict(CONFIG.get("default_params", {}))
         merged.update(bench.get("default_params", {}))
         merged.update(params or {})
+
+        def on_token(piece, count):
+            emit({"type": "token", "benchmark_id": bench["id"],
+                  "index": i, "piece": piece, "n": count})
+
         try:
             messages = build_messages(bench, case)
-            res = chat_completion(model, messages, merged, should_cancel=should_cancel)
+            res = chat_completion(provider, model, messages, merged,
+                                  should_cancel=should_cancel, on_token=on_token)
             if res.get("cancelled"):
                 cancelled = True
                 break
@@ -376,6 +463,9 @@ def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
                 tps_list.append(res["tokens_per_second"])
             comp_tokens_sum += res.get("tokens") or 0
             prompt_tokens_sum += res.get("prompt_tokens") or 0
+            if res.get("cost_usd") is not None:
+                cost_sum += res["cost_usd"]
+                cost_known = True
             if ok:
                 passed += 1
             cr = {
@@ -391,6 +481,7 @@ def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
                 "prompt_tokens": res.get("prompt_tokens"),
                 "total_tokens": res.get("total_tokens"),
                 "tokens_per_second": res.get("tokens_per_second"),
+                "cost_usd": res.get("cost_usd"),
                 "finish_reason": res.get("finish_reason"),
             }
         except Exception as e:  # noqa: BLE001
@@ -415,6 +506,7 @@ def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
         "benchmark_id": bench["id"],
         "benchmark_name": bench["name"],
         "category": bench.get("category"),
+        "provider": provider,
         "model": model,
         "total": total,
         "answered": answered,
@@ -427,13 +519,14 @@ def run_benchmark_stream(model, bench, params, emit, should_cancel=None):
         "total_prompt_tokens": prompt_tokens_sum,
         "total_tokens": comp_tokens_sum + prompt_tokens_sum,
         "total_time_s": total_time,
+        "total_cost_usd": round(cost_sum, 6) if cost_known else None,
         "cancelled": cancelled,
     }
     emit(summary)
     return summary, case_results, cancelled
 
 
-def save_result(model, summaries, all_cases, params, cancelled=False):
+def save_result(provider, model, summaries, all_cases, params, cancelled=False):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     rid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     total = sum(s["total"] for s in summaries)
@@ -443,9 +536,11 @@ def save_result(model, summaries, all_cases, params, cancelled=False):
     prompt_tokens = sum(s.get("total_prompt_tokens") or 0 for s in summaries)
     total_time = round(sum(s.get("total_time_s") or 0 for s in summaries), 3)
     tps_vals = [s.get("avg_tokens_per_second") for s in summaries if s.get("avg_tokens_per_second")]
+    costs = [s.get("total_cost_usd") for s in summaries if s.get("total_cost_usd") is not None]
     record = {
         "id": rid,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "provider": provider,
         "model": model,
         "params": params,
         "cancelled": cancelled,
@@ -458,6 +553,7 @@ def save_result(model, summaries, all_cases, params, cancelled=False):
         "total_tokens": comp_tokens + prompt_tokens,
         "total_time_s": total_time,
         "avg_tokens_per_second": round(sum(tps_vals) / len(tps_vals), 1) if tps_vals else None,
+        "total_cost_usd": round(sum(costs), 6) if costs else None,
         "benchmarks": summaries,
         "cases": all_cases,
     }
@@ -479,6 +575,7 @@ def list_results():
             out.append({
                 "id": r["id"],
                 "timestamp": r["timestamp"],
+                "provider": r.get("provider", "local"),
                 "model": r["model"],
                 "overall_score": r["overall_score"],
                 "total": r["total"],
@@ -488,6 +585,7 @@ def list_results():
                 "total_tokens": r.get("total_tokens"),
                 "total_time_s": r.get("total_time_s"),
                 "avg_tokens_per_second": r.get("avg_tokens_per_second"),
+                "total_cost_usd": r.get("total_cost_usd"),
                 "benchmarks": [
                     {"benchmark_name": b["benchmark_name"], "score": b["score"],
                      "passed": b["passed"], "total": b["total"]}
@@ -567,14 +665,16 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        if path == "/api/config":
+        if path in ("/api/config", "/api/settings"):
             self._send_json({
-                "lmstudio_base_url": CONFIG["lmstudio_base_url"],
+                "lmstudio_base_url": CONFIG.get("lmstudio_base_url", ""),
+                "openrouter_configured": bool(CONFIG.get("openrouter_api_key")),
                 "default_params": CONFIG.get("default_params", {}),
             })
             return
         if path == "/api/models":
-            self._send_json(list_models())
+            provider = (parse_qs(parsed.query).get("provider") or ["local"])[0]
+            self._send_json(list_models(provider))
             return
         if path == "/api/benchmarks":
             benches = all_benchmarks()
@@ -625,10 +725,26 @@ class Handler(BaseHTTPRequestHandler):
                     run["cancel"] = True
             self._send_json({"ok": run is not None, "run_id": rid})
             return
-        if path == "/api/reload-config":
+        if path in ("/api/settings", "/api/reload-config"):
             global CONFIG
+            body = self._read_body()
+            updates = {}
+            if "lmstudio_base_url" in body:
+                updates["lmstudio_base_url"] = (body.get("lmstudio_base_url") or "").strip()
+            # Only overwrite the API key when a non-empty value is supplied, so
+            # saving other settings doesn't wipe a previously stored key.
+            if body.get("openrouter_api_key"):
+                updates["openrouter_api_key"] = body["openrouter_api_key"].strip()
+            if body.get("clear_openrouter_api_key"):
+                updates["openrouter_api_key"] = ""
+            if updates:
+                save_local_settings(updates)
             CONFIG = load_config()
-            self._send_json({"ok": True, "lmstudio_base_url": CONFIG["lmstudio_base_url"]})
+            self._send_json({
+                "ok": True,
+                "lmstudio_base_url": CONFIG.get("lmstudio_base_url", ""),
+                "openrouter_configured": bool(CONFIG.get("openrouter_api_key")),
+            })
             return
 
         self.send_error(404, "Not found")
@@ -636,6 +752,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- streaming run --------------------------------------------------- #
     def _handle_run(self):
         body = self._read_body()
+        provider = body.get("provider", "local")
         model = body.get("model")
         bench_ids = body.get("benchmark_ids", [])
         params = body.get("params", {})
@@ -672,8 +789,9 @@ class Handler(BaseHTTPRequestHandler):
         all_cases = []
         cancelled = False
         try:
-            emit({"type": "run_started", "run_id": run_id, "model": model,
-                  "total_cases": total_cases, "num_benchmarks": len([b for b in selected if b])})
+            emit({"type": "run_started", "run_id": run_id, "provider": provider,
+                  "model": model, "total_cases": total_cases,
+                  "num_benchmarks": len([b for b in selected if b])})
             for bid in bench_ids:
                 if should_cancel():
                     cancelled = True
@@ -683,7 +801,7 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"type": "error", "message": f"benchmark {bid} not found"})
                     continue
                 summary, cases, was_cancelled = run_benchmark_stream(
-                    model, bench, params, emit, should_cancel)
+                    provider, model, bench, params, emit, should_cancel)
                 summaries.append(summary)
                 for c in cases:
                     c["benchmark_id"] = bid
@@ -693,14 +811,15 @@ class Handler(BaseHTTPRequestHandler):
                     break
             if cancelled:
                 emit({"type": "stopped", "run_id": run_id})
-            record = save_result(model, summaries, all_cases, params, cancelled=cancelled)
+            record = save_result(provider, model, summaries, all_cases, params, cancelled=cancelled)
             emit({"type": "saved", "result_id": record["id"],
                   "overall_score": record["overall_score"],
                   "passed": record["passed"], "answered": record["answered"],
                   "total": record["total"], "cancelled": cancelled,
                   "total_tokens": record["total_tokens"],
                   "total_time_s": record["total_time_s"],
-                  "avg_tokens_per_second": record["avg_tokens_per_second"]})
+                  "avg_tokens_per_second": record["avg_tokens_per_second"],
+                  "total_cost_usd": record["total_cost_usd"]})
         except (BrokenPipeError, ConnectionResetError):
             return  # client navigated away
         except Exception as e:  # noqa: BLE001

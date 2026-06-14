@@ -6,18 +6,35 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const state = {
   benchmarks: [],
-  models: [],
+  provider: "local",
+  models: [],            // [{id, name, prompt_price, completion_price, context_length}]
+  modelMap: {},          // id -> model info
 };
 
 function escapeHtml(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+function scoreClass(score) { return score >= 80 ? "good" : score >= 50 ? "mid" : "bad"; }
+function scoreColorVar(s) { return s >= 80 ? "green" : s >= 50 ? "amber" : "red"; }
 
-function scoreClass(score) {
-  if (score >= 80) return "good";
-  if (score >= 50) return "mid";
-  return "bad";
+function fmtDur(s) {
+  if (s == null) return "—";
+  if (s < 60) return s.toFixed(1) + "s";
+  const m = Math.floor(s / 60), r = Math.round(s % 60);
+  return `${m}m ${r}s`;
+}
+function perMillion(p) { return p ? "$" + (p * 1e6).toFixed(2) : "$0"; }
+function fmtCost(c) {
+  if (c == null) return "—";
+  if (c === 0) return "free";
+  if (c < 0.01) return "$" + c.toFixed(5);
+  return "$" + c.toFixed(4);
+}
+function fmtCtx(n) {
+  if (!n) return "";
+  if (n >= 1000) return Math.round(n / 1000) + "K ctx";
+  return n + " ctx";
 }
 
 // ---- tabs -----------------------------------------------------------------
@@ -27,46 +44,145 @@ $$(".tab").forEach((t) => {
     $$(".tab-panel").forEach((x) => x.classList.remove("active"));
     t.classList.add("active");
     $("#tab-" + t.dataset.tab).classList.add("active");
-    if (t.dataset.tab === "history") loadHistory();
+    if (t.dataset.tab === "leaderboard") loadHistory();
     if (t.dataset.tab === "benchmarks") loadBenchmarkDetails();
+    if (t.dataset.tab === "settings") loadSettingsForm();
   });
 });
+$("#endpoint-pill").addEventListener("click", () => {
+  $$(".tab").forEach((x) => x.classList.remove("active"));
+  $$(".tab-panel").forEach((x) => x.classList.remove("active"));
+  $('.tab[data-tab="settings"]').classList.add("active");
+  $("#tab-settings").classList.add("active");
+  loadSettingsForm();
+});
 
-// ---- config / endpoint status ---------------------------------------------
-async function loadConfig() {
+// ---- settings -------------------------------------------------------------
+async function loadSettings() {
   try {
-    const cfg = await fetch("/api/config").then((r) => r.json());
-    $("#endpoint-label").textContent = cfg.lmstudio_base_url;
-    if (cfg.default_params) {
-      if (cfg.default_params.temperature != null) $("#param-temp").value = cfg.default_params.temperature;
-      if (cfg.default_params.max_tokens != null) $("#param-maxtok").value = cfg.default_params.max_tokens;
+    const s = await fetch("/api/settings").then((r) => r.json());
+    state.settings = s;
+    updateEndpointLabel();
+    if (s.default_params) {
+      if (s.default_params.temperature != null) $("#param-temp").value = s.default_params.temperature;
+      if (s.default_params.max_tokens != null) $("#param-maxtok").value = s.default_params.max_tokens;
     }
   } catch (e) {
-    $("#endpoint-label").textContent = "config error";
+    $("#endpoint-label").textContent = "settings error";
   }
 }
 
-// ---- models ---------------------------------------------------------------
-async function loadModels() {
+function updateEndpointLabel() {
+  const s = state.settings || {};
+  if (state.provider === "openrouter") {
+    $("#endpoint-label").textContent = "OpenRouter" + (s.openrouter_configured ? "" : " (no key)");
+  } else {
+    $("#endpoint-label").textContent = s.lmstudio_base_url || "not set";
+  }
+}
+
+function loadSettingsForm() {
+  const s = state.settings || {};
+  $("#set-lmurl").value = s.lmstudio_base_url || "";
+  $("#or-status").innerHTML = s.openrouter_configured
+    ? `<span class="ok-tag">key saved</span>` : `<span class="warn">no key</span>`;
+}
+
+$("#save-settings").addEventListener("click", async () => {
+  const body = { lmstudio_base_url: $("#set-lmurl").value.trim() };
+  const key = $("#set-orkey").value.trim();
+  if (key) body.openrouter_api_key = key;
+  $("#settings-status").textContent = "saving…";
+  try {
+    const r = await fetch("/api/settings", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then((x) => x.json());
+    state.settings = Object.assign(state.settings || {}, r);
+    $("#set-orkey").value = "";
+    $("#settings-status").innerHTML = `<span class="ok-tag">saved ✓</span>`;
+    loadSettingsForm();
+    updateEndpointLabel();
+    loadModels(state.provider); // pick up new URL / key
+  } catch (e) {
+    $("#settings-status").innerHTML = `<span class="warn">save failed</span>`;
+  }
+});
+$("#clear-orkey").addEventListener("click", async () => {
+  const r = await fetch("/api/settings", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clear_openrouter_api_key: true }),
+  }).then((x) => x.json());
+  state.settings = Object.assign(state.settings || {}, r);
+  loadSettingsForm();
+  updateEndpointLabel();
+});
+$("#or-link").addEventListener("click", () => window.open("https://openrouter.ai/keys", "_blank"));
+
+// ---- provider + models ----------------------------------------------------
+$("#provider-select").addEventListener("change", (e) => {
+  state.provider = e.target.value;
+  updateEndpointLabel();
+  loadModels(state.provider);
+});
+$("#refresh-models").addEventListener("click", () => loadModels(state.provider));
+$("#model-search").addEventListener("input", renderModelList);
+$("#model-select").addEventListener("change", renderModelInfo);
+
+async function loadModels(provider) {
   const sel = $("#model-select");
   sel.innerHTML = `<option>loading…</option>`;
   $("#status-dot").className = "dot";
+  $("#model-info").textContent = "";
   try {
-    const data = await fetch("/api/models").then((r) => r.json());
+    const data = await fetch("/api/models?provider=" + encodeURIComponent(provider)).then((r) => r.json());
     if (!data.ok) throw new Error(data.error || "unreachable");
     state.models = data.models;
-    if (!data.models.length) {
-      sel.innerHTML = `<option value="">(no models loaded in LM Studio)</option>`;
-      $("#status-dot").className = "dot bad";
-      return;
-    }
-    sel.innerHTML = data.models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+    state.modelMap = {};
+    data.models.forEach((m) => { state.modelMap[m.id] = m; });
     $("#status-dot").className = "dot ok";
+    renderModelList();
   } catch (e) {
-    sel.innerHTML = `<option value="">LM Studio unreachable</option>`;
+    sel.innerHTML = `<option value="">${provider === "openrouter" ? "OpenRouter" : "LM Studio"} unreachable</option>`;
     $("#status-dot").className = "dot bad";
-    $("#endpoint-label").title = String(e);
+    $("#model-info").innerHTML = `<span class="warn">${escapeHtml(String(e))}</span>`;
   }
+}
+
+function renderModelList() {
+  const sel = $("#model-select");
+  const q = $("#model-search").value.trim().toLowerCase();
+  const prev = sel.value;
+  const list = state.models.filter((m) =>
+    !q || m.id.toLowerCase().includes(q) || (m.name || "").toLowerCase().includes(q));
+  if (!list.length) {
+    sel.innerHTML = `<option value="">no models match "${escapeHtml(q)}"</option>`;
+    return;
+  }
+  sel.innerHTML = list.map((m) => {
+    let label = m.id;
+    if (state.provider === "openrouter" && (m.prompt_price || m.completion_price)) {
+      label += `  —  in ${perMillion(m.prompt_price)} / out ${perMillion(m.completion_price)} per 1M`;
+    }
+    return `<option value="${escapeHtml(m.id)}">${escapeHtml(label)}</option>`;
+  }).join("");
+  // keep previous selection if still present, else select first
+  if (list.some((m) => m.id === prev)) sel.value = prev;
+  else sel.selectedIndex = 0;
+  renderModelInfo();
+}
+
+function renderModelInfo() {
+  const m = state.modelMap[$("#model-select").value];
+  if (!m) { $("#model-info").textContent = ""; return; }
+  const bits = [];
+  if (state.provider === "openrouter") {
+    bits.push(`input <b>${perMillion(m.prompt_price)}</b> / output <b>${perMillion(m.completion_price)}</b> per 1M tokens`);
+    if (m.context_length) bits.push(fmtCtx(m.context_length));
+  } else {
+    bits.push("local model · no per-token cost");
+  }
+  $("#model-info").innerHTML = bits.join(" · ");
 }
 
 // ---- benchmarks list ------------------------------------------------------
@@ -85,28 +201,18 @@ async function loadBenchmarks() {
     </label>`;
   }).join("");
 }
-
 $("#select-all").addEventListener("click", () => $$(".bench-cb").forEach((c) => { if (!c.disabled) c.checked = true; }));
 $("#select-none").addEventListener("click", () => $$(".bench-cb").forEach((c) => c.checked = false));
-$("#refresh-models").addEventListener("click", loadModels);
 
 // ---- run ------------------------------------------------------------------
 let running = false;
-
-$("#run-btn").addEventListener("click", runSelected);
-$("#stop-btn").addEventListener("click", stopRun);
-
-// live-run state
 let currentRunId = null;
 let runAbort = null;
 let statsTimer = null;
+let activeBuffer = "";   // streaming output text for the focal panel
 
-function fmtDur(s) {
-  if (s == null) return "—";
-  if (s < 60) return s.toFixed(1) + "s";
-  const m = Math.floor(s / 60), r = Math.round(s % 60);
-  return `${m}m ${r}s`;
-}
+$("#run-btn").addEventListener("click", runSelected);
+$("#stop-btn").addEventListener("click", stopRun);
 
 async function stopRun() {
   $("#stop-btn").disabled = true;
@@ -123,10 +229,14 @@ async function stopRun() {
 
 async function runSelected() {
   if (running) return;
+  const provider = state.provider;
   const model = $("#model-select").value;
   const benchmark_ids = $$(".bench-cb").filter((c) => c.checked).map((c) => c.value);
-  if (!model) { alert("No model selected. Load a model in LM Studio first."); return; }
+  if (!model) { alert("No model selected."); return; }
   if (!benchmark_ids.length) { alert("Select at least one benchmark."); return; }
+  if (provider === "openrouter" && state.settings && !state.settings.openrouter_configured) {
+    if (!confirm("No OpenRouter API key is set (Settings tab). The run will likely fail. Continue anyway?")) return;
+  }
 
   const params = {
     temperature: parseFloat($("#param-temp").value),
@@ -142,32 +252,28 @@ async function runSelected() {
   $("#live-results").innerHTML = "";
   $("#progress-bar").style.width = "0%";
   $("#live-stats").classList.remove("hidden");
+  $("#live-active").classList.add("hidden");
 
-  // running tally across the whole run
   const agg = {
-    startedAt: Date.now(),
-    totalCases: state.benchmarks.filter((b) => benchmark_ids.includes(b.id))
-      .reduce((acc, b) => acc + b.count, 0),
+    startedAt: Date.now(), provider,
+    totalCases: state.benchmarks.filter((b) => benchmark_ids.includes(b.id)).reduce((a, b) => a + b.count, 0),
     doneCases: 0, passed: 0, completionTokens: 0, promptTokens: 0,
-    tpsSum: 0, tpsN: 0, finished: false,
+    tpsSum: 0, tpsN: 0, cost: 0, costKnown: false, finished: false,
   };
   renderLiveStats(agg);
-  statsTimer = setInterval(() => renderLiveStats(agg), 250); // keep the clock ticking
+  statsTimer = setInterval(() => renderLiveStats(agg), 250);
 
-  const blocks = {}; // benchmark_id -> {passed, seen, total}
-
+  const blocks = {};
   try {
     runAbort = new AbortController();
     const resp = await fetch("/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model, benchmark_ids, params }),
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider, model, benchmark_ids, params }),
       signal: runAbort.signal,
     });
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
-
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -177,23 +283,20 @@ async function runSelected() {
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
-        const ev = JSON.parse(line);
-        handleEvent(ev, blocks, agg);
+        handleEvent(JSON.parse(line), blocks, agg);
       }
     }
   } catch (e) {
-    if (!(e && e.name === "AbortError")) {
+    if (!(e && e.name === "AbortError"))
       $("#run-status").innerHTML = `<span class="warn">Run failed: ${escapeHtml(String(e))}</span>`;
-    }
   } finally {
     agg.finished = true;
     clearInterval(statsTimer);
     renderLiveStats(agg);
-    running = false;
-    currentRunId = null;
-    runAbort = null;
+    running = false; currentRunId = null; runAbort = null;
     $("#run-btn").classList.remove("hidden");
     $("#stop-btn").classList.add("hidden");
+    $("#live-active").classList.add("hidden");
   }
 }
 
@@ -208,94 +311,98 @@ function renderLiveStats(agg) {
     ["🔢 Tokens", `${totalTok.toLocaleString()} (${agg.completionTokens.toLocaleString()} out)`],
     ["⚡ Avg speed", avgTps != null ? `${avgTps.toFixed(1)} tok/s` : "—"],
   ];
+  if (agg.provider === "openrouter") chips.push(["💲 Cost", agg.costKnown ? fmtCost(agg.cost) : "—"]);
   $("#live-stats").innerHTML = chips.map(([k, v]) =>
     `<div class="stat-chip"><span class="sk">${k}</span><span class="sv">${v}</span></div>`).join("");
 }
 
 function handleEvent(ev, blocks, agg) {
-  if (ev.type === "run_started") {
-    currentRunId = ev.run_id;
-    if (ev.total_cases) agg.totalCases = ev.total_cases;
-    $("#run-status").textContent = "running…";
-  }
-  if (ev.type === "start") {
-    const id = ev.benchmark_id;
-    const wrap = document.createElement("div");
-    wrap.className = "result-block";
-    wrap.innerHTML = `
-      <div class="result-head">
-        <div class="score-badge" id="badge-${id}">…</div>
-        <div class="rh-name">${escapeHtml(ev.benchmark_name)}</div>
-        <div class="rh-meta" id="meta-${id}">0 / ${ev.total}</div>
-      </div>
-      <div class="case-table" id="table-${id}"></div>`;
-    $("#live-results").appendChild(wrap);
-    blocks[id] = { passed: 0, seen: 0, total: ev.total };
-  }
-  if (ev.type === "case_start") {
-    // show a "running" placeholder row that the matching "case" event replaces
-    const bid = ev.benchmark_id || currentBenchId(blocks);
-    const table = $("#table-" + bid);
-    if (table) {
-      const row = document.createElement("div");
-      row.className = "case-row running";
-      row.id = `running-${bid}`;
-      row.innerHTML = `<span class="mark spin">◴</span>
-        <span class="cprompt">${escapeHtml(firstLine(ev.prompt))}</span>
-        <span class="clat">generating…</span>`;
-      // remove any stale running row first
-      const old = $("#running-" + bid);
-      if (old) old.remove();
-      table.appendChild(row);
-      table.parentElement.scrollIntoView({ block: "nearest" });
+  switch (ev.type) {
+    case "run_started":
+      currentRunId = ev.run_id;
+      if (ev.total_cases) agg.totalCases = ev.total_cases;
+      $("#run-status").textContent = "running…";
+      break;
+    case "start": {
+      const id = ev.benchmark_id;
+      const wrap = document.createElement("div");
+      wrap.className = "result-block";
+      wrap.innerHTML = `
+        <div class="result-head">
+          <div class="score-badge" id="badge-${id}">…</div>
+          <div class="rh-name">${escapeHtml(ev.benchmark_name)}</div>
+          <div class="rh-meta" id="meta-${id}">0 / ${ev.total}</div>
+        </div>
+        <div class="case-table" id="table-${id}"></div>`;
+      $("#live-results").appendChild(wrap);
+      blocks[id] = { passed: 0, seen: 0, total: ev.total };
+      break;
     }
-    $("#run-status").textContent = `running case ${ev.index + 1} / ${ev.total}…`;
-  }
-  if (ev.type === "case") {
-    const bid = currentBenchId(blocks);
-    const blk = blocks[bid];
-    const running = $("#running-" + bid);
-    if (running) running.remove();
-    if (blk) {
-      blk.seen++;
-      if (ev.result.passed) blk.passed++;
-      const table = $("#table-" + bid);
-      if (table) table.appendChild(renderCaseRow(ev.result));
-      const meta = $("#meta-" + bid);
-      if (meta) meta.textContent = `${blk.passed} / ${blk.total}`;
+    case "case_start": {
+      // focal panel: show the prompt going in, reset the streaming output area
+      activeBuffer = "";
+      $("#live-active").classList.remove("hidden");
+      $("#la-head").textContent = `${ev.benchmark_id} · case ${ev.index + 1} / ${ev.total} · generating…`;
+      $("#la-prompt").textContent = ev.prompt;
+      $("#la-output").innerHTML = `<span id="la-text"></span><span class="cursor">▋</span>`;
+      $("#la-toks").textContent = "";
+      $("#run-status").textContent = `running case ${ev.index + 1} / ${ev.total}…`;
+      break;
     }
-    // global aggregate
-    agg.doneCases++;
-    if (ev.result.passed) agg.passed++;
-    agg.completionTokens += ev.result.tokens || 0;
-    agg.promptTokens += ev.result.prompt_tokens || 0;
-    if (ev.result.tokens_per_second != null) { agg.tpsSum += ev.result.tokens_per_second; agg.tpsN++; }
-    $("#progress-bar").style.width = (100 * agg.doneCases / Math.max(1, agg.totalCases)) + "%";
-    renderLiveStats(agg);
-  }
-  if (ev.type === "done") {
-    const id = ev.benchmark_id;
-    const badge = $("#badge-" + id);
-    if (badge) {
-      badge.textContent = ev.score + "%";
-      badge.className = "score-badge " + scoreClass(ev.score);
+    case "token": {
+      // every token streamed from the model, appended live
+      activeBuffer += ev.piece;
+      const t = $("#la-text");
+      if (t) t.textContent = activeBuffer;
+      $("#la-toks").textContent = `${ev.n} tok`;
+      const out = $("#la-output");
+      if (out) out.scrollTop = out.scrollHeight;
+      break;
     }
-    const meta = $("#meta-" + id);
-    if (meta) meta.innerHTML = benchMetaLine(ev);
-  }
-  if (ev.type === "stopped") {
-    $("#run-status").innerHTML = `<span class="warn">■ Stopped by user</span>`;
-  }
-  if (ev.type === "saved") {
-    const tail = ev.cancelled ? "stopped · partial saved" : "done · saved";
-    $("#run-status").innerHTML =
-      `${tail} — ${ev.passed}/${ev.answered ?? ev.total} passed · `
-      + `${(ev.total_tokens || 0).toLocaleString()} tokens · ${fmtDur(ev.total_time_s)}`
-      + (ev.avg_tokens_per_second ? ` · ${ev.avg_tokens_per_second} tok/s` : "");
-    if (!ev.cancelled) $("#progress-bar").style.width = "100%";
-  }
-  if (ev.type === "fatal") {
-    $("#run-status").innerHTML = `<span class="warn">Error: ${escapeHtml(ev.message)}</span>`;
+    case "case": {
+      const bid = currentBenchId(blocks);
+      const blk = blocks[bid];
+      if (blk) {
+        blk.seen++;
+        if (ev.result.passed) blk.passed++;
+        const table = $("#table-" + bid);
+        if (table) table.appendChild(renderCaseRow(ev.result));
+        const meta = $("#meta-" + bid);
+        if (meta) meta.textContent = `${blk.passed} / ${blk.total}`;
+      }
+      agg.doneCases++;
+      if (ev.result.passed) agg.passed++;
+      agg.completionTokens += ev.result.tokens || 0;
+      agg.promptTokens += ev.result.prompt_tokens || 0;
+      if (ev.result.tokens_per_second != null) { agg.tpsSum += ev.result.tokens_per_second; agg.tpsN++; }
+      if (ev.result.cost_usd != null) { agg.cost += ev.result.cost_usd; agg.costKnown = true; }
+      $("#progress-bar").style.width = (100 * agg.doneCases / Math.max(1, agg.totalCases)) + "%";
+      renderLiveStats(agg);
+      break;
+    }
+    case "done": {
+      const badge = $("#badge-" + ev.benchmark_id);
+      if (badge) { badge.textContent = ev.score + "%"; badge.className = "score-badge " + scoreClass(ev.score); }
+      const meta = $("#meta-" + ev.benchmark_id);
+      if (meta) meta.innerHTML = benchMetaLine(ev);
+      break;
+    }
+    case "stopped":
+      $("#run-status").innerHTML = `<span class="warn">■ Stopped by user</span>`;
+      break;
+    case "saved": {
+      const tail = ev.cancelled ? "stopped · partial saved" : "done · saved";
+      let s = `${tail} — ${ev.passed}/${ev.answered ?? ev.total} passed · `
+        + `${(ev.total_tokens || 0).toLocaleString()} tokens · ${fmtDur(ev.total_time_s)}`;
+      if (ev.avg_tokens_per_second) s += ` · ${ev.avg_tokens_per_second} tok/s`;
+      if (ev.total_cost_usd != null) s += ` · ${fmtCost(ev.total_cost_usd)}`;
+      $("#run-status").innerHTML = s;
+      if (!ev.cancelled) $("#progress-bar").style.width = "100%";
+      break;
+    }
+    case "fatal":
+      $("#run-status").innerHTML = `<span class="warn">Error: ${escapeHtml(ev.message)}</span>`;
+      break;
   }
 }
 
@@ -304,13 +411,13 @@ function benchMetaLine(s) {
   if (s.avg_tokens_per_second != null) bits.push(`${s.avg_tokens_per_second} tok/s`);
   if (s.avg_latency_s != null) bits.push(`${s.avg_latency_s}s/case`);
   if (s.total_tokens) bits.push(`${s.total_tokens.toLocaleString()} tok`);
+  if (s.total_cost_usd != null) bits.push(fmtCost(s.total_cost_usd));
   if (s.total_time_s != null) bits.push(fmtDur(s.total_time_s));
   return bits.map(escapeHtml).join(" · ");
 }
 
 function currentBenchId(blocks) {
   const ids = Object.keys(blocks);
-  // the most recently started, not-yet-complete block
   for (let i = ids.length - 1; i >= 0; i--) {
     if (blocks[ids[i]].seen < blocks[ids[i]].total) return ids[i];
   }
@@ -325,6 +432,7 @@ function renderCaseRow(r) {
   if (r.latency_s != null) metaBits.push(`${r.latency_s}s`);
   if (r.tokens != null) metaBits.push(`${r.tokens} tok`);
   if (r.tokens_per_second != null) metaBits.push(`${r.tokens_per_second} tok/s`);
+  if (r.cost_usd != null && r.cost_usd > 0) metaBits.push(fmtCost(r.cost_usd));
   div.innerHTML = `${mark}<span class="cprompt">${escapeHtml(firstLine(r.prompt))}</span>`
     + `<span class="clat">${escapeHtml(metaBits.join(" · "))}</span>`;
   div.addEventListener("click", () => showCaseModal(r));
@@ -345,6 +453,7 @@ function showCaseModal(r) {
     ["Completion tokens", r.tokens ?? "—"],
     ["Prompt tokens", r.prompt_tokens ?? "—"],
     ["Total tokens", r.total_tokens ?? "—"],
+    ["Cost", r.cost_usd != null ? fmtCost(r.cost_usd) : "—"],
     ["Finish reason", r.finish_reason ?? "—"],
   ];
   $("#modal-content").innerHTML = `
@@ -358,11 +467,10 @@ function showCaseModal(r) {
     <div class="kv"><div class="k">Scoring detail</div><pre>${escapeHtml(r.detail)}</pre></div>`;
   $("#modal").classList.remove("hidden");
 }
-
 $("#modal-close").addEventListener("click", () => $("#modal").classList.add("hidden"));
 $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") $("#modal").classList.add("hidden"); });
 
-// ---- history --------------------------------------------------------------
+// ---- leaderboard ----------------------------------------------------------
 async function loadHistory() {
   const data = await fetch("/api/results").then((r) => r.json());
   const list = $("#history-list");
@@ -370,39 +478,38 @@ async function loadHistory() {
     list.innerHTML = `<div class="empty">No runs yet. Run some benchmarks first.</div>`;
     return;
   }
-  list.innerHTML = data.results.map((r) => {
+  const rows = data.results.map((r) => {
     const when = new Date(r.timestamp).toLocaleString();
-    const benches = r.benchmarks.map((b) => `${escapeHtml(b.benchmark_name)} ${b.score}%`).join(" · ");
+    const prov = r.provider === "openrouter"
+      ? `<span class="prov-tag or">☁️ OpenRouter</span>` : `<span class="prov-tag local">🖥️ local</span>`;
     const stopped = r.cancelled ? ` <span class="warn">(stopped)</span>` : "";
-    const perf = [];
-    if (r.total_tokens) perf.push(`${r.total_tokens.toLocaleString()} tok`);
-    if (r.avg_tokens_per_second != null) perf.push(`${r.avg_tokens_per_second} tok/s`);
-    if (r.total_time_s != null) perf.push(fmtDur(r.total_time_s));
-    return `<div class="hist-row" data-id="${r.id}">
-      <div class="hr-score ${scoreClass(r.overall_score)}" style="color:var(--${scoreColorVar(r.overall_score)})">${r.overall_score}%</div>
-      <div>
-        <div class="hr-model">${escapeHtml(r.model)}${stopped}</div>
-        <div class="hr-bench">${benches}</div>
-      </div>
-      <div class="hr-time">${when}<br>${escapeHtml(perf.join(" · "))}</div>
-      <div class="hr-time">${r.passed}/${r.answered ?? r.total}</div>
-    </div>`;
+    return `<tr class="lb-row" data-id="${r.id}">
+      <td class="lb-score" style="color:var(--${scoreColorVar(r.overall_score)})">${r.overall_score}%</td>
+      <td><div class="lb-model">${escapeHtml(r.model)}${stopped}</div><div class="muted lb-when">${when}</div></td>
+      <td>${prov}</td>
+      <td>${r.avg_tokens_per_second != null ? r.avg_tokens_per_second + " tok/s" : "—"}</td>
+      <td>${r.total_cost_usd != null ? fmtCost(r.total_cost_usd) : (r.provider === "openrouter" ? "—" : "free")}</td>
+      <td>${fmtDur(r.total_time_s)}</td>
+      <td>${r.passed}/${r.answered ?? r.total}</td>
+    </tr>`;
   }).join("");
-  $$(".hist-row").forEach((row) => row.addEventListener("click", () => showRunDetail(row.dataset.id)));
+  list.innerHTML = `<table class="leaderboard">
+    <thead><tr><th>Score</th><th>Model</th><th>Provider</th><th>Speed</th><th>Cost</th><th>Time</th><th>Passed</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  $$(".lb-row").forEach((row) => row.addEventListener("click", () => showRunDetail(row.dataset.id)));
 }
-
-function scoreColorVar(s) { return s >= 80 ? "green" : s >= 50 ? "amber" : "red"; }
+$("#refresh-history").addEventListener("click", loadHistory);
 
 async function showRunDetail(id) {
   const r = await fetch("/api/results/" + id).then((x) => x.json());
   const byBench = {};
-  (r.cases || []).forEach((c) => {
-    (byBench[c.benchmark_id] = byBench[c.benchmark_id] || []).push(c);
-  });
+  (r.cases || []).forEach((c) => { (byBench[c.benchmark_id] = byBench[c.benchmark_id] || []).push(c); });
   const overall = [
     ["Overall", `${r.overall_score}%  (${r.passed}/${r.answered ?? r.total})`],
-    ["Total tokens", (r.total_tokens || 0).toLocaleString() + (r.total_completion_tokens != null ? ` (${r.total_completion_tokens.toLocaleString()} out)` : "")],
+    ["Provider", r.provider === "openrouter" ? "OpenRouter" : "local"],
+    ["Total tokens", (r.total_tokens || 0).toLocaleString()],
     ["Avg speed", r.avg_tokens_per_second != null ? r.avg_tokens_per_second + " tok/s" : "—"],
+    ["Total cost", r.total_cost_usd != null ? fmtCost(r.total_cost_usd) : (r.provider === "openrouter" ? "—" : "free")],
     ["Total time", fmtDur(r.total_time_s)],
   ];
   let html = `<div class="card"><div class="row between"><h2>${escapeHtml(r.model)}`
@@ -429,13 +536,10 @@ async function showRunDetail(id) {
   $("#history-detail").scrollIntoView({ behavior: "smooth" });
 }
 
-$("#refresh-history").addEventListener("click", loadHistory);
-
 // ---- benchmark details tab ------------------------------------------------
 async function loadBenchmarkDetails() {
   const data = await fetch("/api/benchmarks").then((r) => r.json());
-  const el = $("#benchmarks-detail");
-  el.innerHTML = data.benchmarks.map((b) => `
+  $("#benchmarks-detail").innerHTML = data.benchmarks.map((b) => `
     <div class="bench-detail">
       <h3>${escapeHtml(b.name)} <span class="cat-tag">${escapeHtml(b.category || "")}</span></h3>
       <div class="muted">${escapeHtml(b.description || "")}</div>
@@ -448,6 +552,8 @@ async function loadBenchmarkDetails() {
 $("#refresh-benchmarks").addEventListener("click", loadBenchmarkDetails);
 
 // ---- init -----------------------------------------------------------------
-loadConfig();
-loadModels();
-loadBenchmarks();
+(async function init() {
+  await loadSettings();
+  loadModels(state.provider);
+  loadBenchmarks();
+})();

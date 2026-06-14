@@ -13,10 +13,10 @@
       <span class="logo">🏟️</span>
       <div>
         <h1>LocalLLMArena</h1>
-        <span class="subtitle">Benchmark your local LLMs via LM Studio</span>
+        <span class="subtitle">Benchmark &amp; compare local and cloud LLMs</span>
       </div>
     </div>
-    <div class="endpoint">
+    <div class="endpoint" id="endpoint-pill" title="Configure in Settings">
       <span class="dot" id="status-dot"></span>
       <span id="endpoint-label">connecting…</span>
     </div>
@@ -24,25 +24,37 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="run">Run</button>
-    <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="leaderboard">Leaderboard</button>
     <button class="tab" data-tab="benchmarks">Benchmarks</button>
+    <button class="tab" data-tab="settings">Settings</button>
   </nav>
 
   <!-- RUN TAB -->
   <section id="tab-run" class="tab-panel active">
     <div class="config-grid">
       <div class="card">
-        <label class="field-label">Model</label>
+        <label class="field-label">Provider &amp; model</label>
         <div class="row">
-          <select id="model-select"></select>
+          <select id="provider-select" title="Where to run the model">
+            <option value="local">🖥️ LM Studio (local)</option>
+            <option value="openrouter">☁️ OpenRouter (cloud)</option>
+          </select>
           <button id="refresh-models" class="btn-secondary" title="Reload model list">↻</button>
         </div>
+        <input id="model-search" class="model-search" placeholder="filter models…" />
+        <select id="model-select" size="7"></select>
+        <div id="model-info" class="model-info"></div>
+
         <div class="params">
-          <label>Temperature
+          <label>
+            <span class="param-name">Temperature <span class="info" title="Controls randomness of the model's sampling. 0 = deterministic / greedy decoding — the model always picks the most likely next token, giving reproducible answers (best for benchmarking). Higher values (0.7–1.0) make output more varied and creative but less repeatable; very high (&gt;1.2) can become incoherent.">ⓘ</span></span>
             <input type="number" id="param-temp" value="0" step="0.1" min="0" max="2" />
+            <span class="param-help">0 = deterministic (recommended for fair benchmarks). Higher = more random/creative.</span>
           </label>
-          <label>Max tokens
+          <label>
+            <span class="param-name">Max tokens <span class="info" title="The maximum number of tokens (≈ word pieces) the model may generate in its answer. Generation stops when this limit is reached even if the model isn't finished (you'll see finish_reason = 'length'). Raise it for long answers like essays or chain-of-thought; lower it to cap cost and time.">ⓘ</span></span>
             <input type="number" id="param-maxtok" value="1024" step="64" min="16" />
+            <span class="param-help">Upper limit on answer length. Too low truncates reasoning; higher costs more time/$.</span>
           </label>
         </div>
       </div>
@@ -67,16 +79,33 @@
     </div>
 
     <div id="live-stats" class="live-stats hidden"></div>
+
+    <!-- focal "now generating" panel: shows the prompt going in and tokens streaming out -->
+    <div id="live-active" class="live-active hidden">
+      <div class="la-head" id="la-head"></div>
+      <div class="la-cols">
+        <div class="la-pane">
+          <div class="la-k">▶ Prompt (input)</div>
+          <pre id="la-prompt"></pre>
+        </div>
+        <div class="la-pane">
+          <div class="la-k">◀ Output (streaming) <span id="la-toks" class="la-toks"></span></div>
+          <pre id="la-output"><span id="la-cursor" class="cursor">▋</span></pre>
+        </div>
+      </div>
+    </div>
+
     <div id="live-results"></div>
   </section>
 
-  <!-- HISTORY TAB -->
-  <section id="tab-history" class="tab-panel">
+  <!-- LEADERBOARD TAB -->
+  <section id="tab-leaderboard" class="tab-panel">
     <div class="card">
       <div class="row between">
-        <h2>Past runs</h2>
+        <h2>Leaderboard</h2>
         <button id="refresh-history" class="btn-secondary">↻ Refresh</button>
       </div>
+      <p class="muted">Every run is recorded here so you can compare models on score, speed, and cost. Click a row for the full breakdown.</p>
       <div id="history-list"></div>
     </div>
     <div id="history-detail"></div>
@@ -89,6 +118,32 @@
       <p class="muted">Each benchmark is a JSON file in the <code>benchmarks/</code> folder. Add your own by dropping a new file there (see the README for the format), then click Refresh.</p>
       <button id="refresh-benchmarks" class="btn-secondary">↻ Refresh</button>
       <div id="benchmarks-detail"></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS TAB -->
+  <section id="tab-settings" class="tab-panel">
+    <div class="card">
+      <h2>Settings</h2>
+      <p class="muted">Saved locally to <code>settings.local.json</code>, which is gitignored — your URL and API key are never committed to the repository.</p>
+
+      <div class="setting-row">
+        <label class="field-label">LM Studio base URL</label>
+        <input id="set-lmurl" placeholder="http://localhost:1234" />
+        <span class="param-help">The address of your LM Studio server (Developer → Start Server). The app adds <code>/v1</code> automatically.</span>
+      </div>
+
+      <div class="setting-row">
+        <label class="field-label">OpenRouter API key <span id="or-status" class="or-status"></span></label>
+        <input id="set-orkey" type="password" placeholder="sk-or-v1-… (leave blank to keep current)" />
+        <span class="param-help">Needed only to <em>run</em> OpenRouter models (browsing the catalog works without it). Get one at <span class="linklike" id="or-link">openrouter.ai/keys</span>.</span>
+      </div>
+
+      <div class="row" style="margin-top:14px; gap:10px;">
+        <button id="save-settings" class="btn-primary">Save settings</button>
+        <button id="clear-orkey" class="btn-secondary">Clear OpenRouter key</button>
+        <span id="settings-status" class="run-status"></span>
+      </div>
     </div>
   </section>
 

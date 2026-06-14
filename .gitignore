@@ -2,6 +2,10 @@
 __pycache__/
 *.pyc
 
+# Local, machine-specific settings (LM Studio URL, OpenRouter API key).
+# Never commit this — it overrides config.json and may hold secrets.
+settings.local.json
+
 # Saved benchmark runs (local, generated at runtime)
 results/*.json
 

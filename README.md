@@ -1,9 +1,11 @@
 # 🏟️ LocalLLMArena
 
-A small, **zero-dependency** local web app for benchmarking the LLMs you run in
-[LM Studio](https://lmstudio.ai/). It ships with a handful of public-style
-benchmarks (math, knowledge, reasoning, coding, instruction-following) and lets
-you drop in your own tests as plain JSON files.
+A small, **zero-dependency** local web app for benchmarking and comparing LLMs.
+Run models **locally** via [LM Studio](https://lmstudio.ai/) and/or in the cloud
+via [OpenRouter](https://openrouter.ai/), then compare them side by side on a
+leaderboard by **score, speed, and price**. It ships with a handful of
+public-style benchmarks (math, knowledge, reasoning, coding,
+instruction-following) and lets you drop in your own tests as plain JSON files.
 
 No `pip install`, no Node, no build step — just Python 3 standard library.
 
@@ -12,8 +14,7 @@ No `pip install`, no Node, no build step — just Python 3 standard library.
 ## Quick start
 
 1. In **LM Studio**, load a model and start the local server (the "Developer" →
-   "Start Server" tab). It exposes an OpenAI-compatible API. This app is
-   pre-pointed at `http://192.168.9.125:1234`.
+   "Start Server" tab). It exposes an OpenAI-compatible API.
 
 2. Run the app:
 
@@ -23,29 +24,51 @@ No `pip install`, no Node, no build step — just Python 3 standard library.
 
 3. Open the printed URL (default <http://localhost:8080>) in your browser.
 
-4. Pick a model, tick the benchmarks you want, and click **Run selected**.
-   Results stream in live and are saved to `results/` for the History tab.
-   Hit **■ Stop** at any time to cancel mid-run (the partial result is saved).
+4. Open the **Settings** tab and set your **LM Studio base URL** (e.g.
+   `http://localhost:1234`). Optionally paste an **OpenRouter API key** to also
+   test cloud models. These are saved to `settings.local.json`, which is
+   **gitignored** — your URL and key never end up in the repository.
 
-### Live metrics
+5. Pick a **provider** (LM Studio or OpenRouter) and a **model** (the OpenRouter
+   list is searchable and shows per-token pricing), tick the benchmarks you
+   want, and click **Run selected**. Results stream in live and are saved for
+   the **Leaderboard** tab. Hit **■ Stop** any time to cancel mid-run (the
+   partial result is saved).
 
-Each question is generated via the streaming API, so you see results appear in
-real time along with detailed performance metrics, captured per case and
-aggregated per benchmark and per run:
+### Live view & metrics
+
+Each question is generated via the streaming API. A focal **"now generating"**
+panel shows the prompt going **in** and the answer streaming **out token by
+token**, while a live stats strip shows elapsed time, cases done, pass count,
+running token total, average speed, and (for OpenRouter) running cost.
+
+Detailed metrics are captured per case and aggregated per benchmark and per run:
 
 - **Tokens** — prompt, completion, and total token counts (from the model's usage report)
 - **Speed** — tokens/second (measured over the decode window, with a fall-back
   for very short outputs)
 - **Time to first token (TTFT)** and **total latency** per question
+- **Cost (USD)** for OpenRouter runs (exact, reported by OpenRouter); local runs are free
 - **Total wall-clock time** and **average speed** for the whole run
 - **Finish reason** (e.g. `stop`, `length`)
 
-A live stats strip during the run shows elapsed time, cases done, pass count,
-running token total, and average speed. Click any question row to inspect its
-full prompt, expected answer, model output, and all metrics.
+Click any question row to inspect its full prompt, expected answer, model
+output, and all metrics.
 
-If your LM Studio endpoint differs, edit `lmstudio_base_url` in
-[`config.json`](config.json) and restart (or POST `/api/reload-config`).
+### Comparing models (leaderboard)
+
+Every run is saved and listed on the **Leaderboard** tab as a sortable table:
+score, model, provider, speed (tok/s), cost, total time, and pass count. Run the
+same benchmarks against a local model and an OpenRouter model to compare quality
+vs. speed vs. price directly.
+
+### Configuration
+
+The committed [`config.json`](config.json) holds only generic defaults (it points
+at `http://localhost:1234`). Your machine-specific **LM Studio URL** and
+**OpenRouter API key** live in `settings.local.json` (gitignored), edited from
+the **Settings** tab or via `POST /api/settings`. This keeps secrets and private
+addresses out of the public repo.
 
 ---
 
@@ -113,22 +136,29 @@ reliable. You can override it with your own `system_prompt`.
 ## How it works
 
 ```
-server.py        Pure-stdlib HTTP server. Serves the web UI and a small JSON API,
-                 calls LM Studio's /v1/chat/completions, scores each answer, and
-                 streams results back as newline-delimited JSON (NDJSON).
-benchmarks/*.json  One file per benchmark (see format above).
-results/*.json     One file per run, powering the History tab.
-web/             index.html + app.js + styles.css — no framework, no build.
-config.json      LM Studio URL, default params, server port.
+server.py            Pure-stdlib HTTP server. Serves the web UI and a small JSON
+                     API, calls the provider's /v1/chat/completions (streaming),
+                     scores each answer, computes metrics/cost, and streams
+                     results back as newline-delimited JSON (NDJSON).
+benchmarks/*.json    One file per benchmark (see format above).
+results/*.json       One file per run, powering the Leaderboard tab.
+web/                 index.html + app.js + styles.css — no framework, no build.
+config.json          Generic defaults (committed). Points at localhost.
+settings.local.json  Your LM Studio URL + OpenRouter key (gitignored, never committed).
 ```
+
+Two providers are supported, both OpenAI-compatible: **local** (LM Studio or any
+local server) and **openrouter** (cloud). The token stream is parsed for live
+tokens, usage, and — for OpenRouter — exact cost (`usage.include`).
 
 API endpoints (handy if you want to script runs):
 
-- `GET  /api/models` — models currently loaded in LM Studio
+- `GET  /api/models?provider=local|openrouter` — available models (OpenRouter incl. pricing)
+- `GET  /api/settings` / `POST /api/settings` — read / save the LM Studio URL & OpenRouter key
 - `GET  /api/benchmarks` — list benchmark metadata
 - `GET  /api/benchmarks/{id}` — full benchmark incl. cases
-- `POST /api/run` — `{ "model", "benchmark_ids": [...], "params": {...} }` → NDJSON stream
-  (first event is `run_started` with a `run_id`)
+- `POST /api/run` — `{ "provider", "model", "benchmark_ids": [...], "params": {...} }` → NDJSON stream
+  (first event is `run_started` with a `run_id`; `token` events stream every token)
 - `POST /api/run/stop` — `{ "run_id" }` cancels an in-flight run
 - `GET  /api/results` / `GET /api/results/{id}` — saved runs
 
@@ -142,5 +172,8 @@ API endpoints (handy if you want to script runs):
 - Scoring for open-ended tasks (`contains`/`regex`) is heuristic. The multiple-choice
   and numeric benchmarks are the most robust.
 - `temperature: 0` is recommended for reproducible benchmarking.
+- **OpenRouter costs real money.** Cost shown is what OpenRouter reports for the
+  run. Watch `max_tokens` and benchmark sizes when testing expensive models.
 - The server binds to `0.0.0.0` so you can reach it from other devices on your
-  LAN; it has no authentication, so only run it on a trusted network.
+  LAN; it has no authentication, so only run it on a trusted network. Your
+  OpenRouter key is stored in plain text in `settings.local.json` (gitignored).

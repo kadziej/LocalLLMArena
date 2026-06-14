@@ -1,5 +1,6 @@
 {
-  "lmstudio_base_url": "http://192.168.9.125:1234",
+  "lmstudio_base_url": "http://localhost:1234",
+  "openrouter_api_key": "",
   "request_timeout_seconds": 600,
   "default_params": {
     "temperature": 0,
