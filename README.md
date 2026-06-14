@@ -65,6 +65,15 @@ runs in its own live section, and each is saved as its own leaderboard row.
 remaining models are skipped). If the queue is empty, the Run button just runs
 the single model currently selected.
 
+### Runs survive a page refresh
+
+Runs (and queues) execute in a **background thread on the server** and buffer
+their events, so they are **not** tied to the browser tab. If you refresh the
+page — or close it and come back — the app detects the run still in progress via
+`GET /api/runs` and **re-attaches** to its live event stream, rebuilding the UI
+(all sections, rows, and the live token view) and continuing from where it is.
+Closing the tab no longer kills the run.
+
 ### Comparing models (leaderboard)
 
 Every run is saved and listed on the **Leaderboard** tab as a sortable table:
@@ -167,9 +176,13 @@ API endpoints (handy if you want to script runs):
 - `GET  /api/settings` / `POST /api/settings` — read / save the LM Studio URL & OpenRouter key
 - `GET  /api/benchmarks` — list benchmark metadata
 - `GET  /api/benchmarks/{id}` — full benchmark incl. cases
-- `POST /api/run` — `{ "provider", "model", "benchmark_ids": [...], "params": {...} }` → NDJSON stream
-  (first event is `run_started` with a `run_id`; `token` events stream every token)
-- `POST /api/run/stop` — `{ "run_id" }` cancels an in-flight run
+- `POST /api/run` — `{ "targets": [{provider, model}, ...], "benchmark_ids": [...], "params": {...} }`
+  starts a background run (queue) and streams its NDJSON events. Events: `run_started`,
+  `target_start` (per model), `start`/`case_start`/`token`/`case`/`done` (per benchmark),
+  `saved` (per model), `queue_done`. Still accepts the legacy `{ provider, model }` form.
+- `GET  /api/runs` — runs currently in progress (so a refreshed page can re-attach)
+- `GET  /api/run/stream?run_id=…&since=N` — (re)attach to a run's event stream from index N
+- `POST /api/run/stop` — `{ "run_id" }` cancels an in-flight run/queue
 - `GET  /api/results` / `GET /api/results/{id}` — saved runs
 
 ---

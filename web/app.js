@@ -206,7 +206,6 @@ $("#select-none").addEventListener("click", () => $$(".bench-cb").forEach((c) =>
 
 // ---- run ------------------------------------------------------------------
 let running = false;
-let currentRunId = null;
 let runAbort = null;
 let statsTimer = null;
 let activeBuffer = "";   // streaming output text for the focal panel
@@ -216,7 +215,6 @@ $("#stop-btn").addEventListener("click", stopRun);
 $("#add-to-queue").addEventListener("click", addToQueue);
 
 // ---- model queue ----------------------------------------------------------
-let queueStopped = false;
 let runSeq = 0;
 
 function providerIcon(p) { return p === "openrouter" ? "☁️" : "🖥️"; }
@@ -257,19 +255,74 @@ function updateRunButton() {
     : n === 1 ? "▶ Run 1 model" : "▶ Run selected model";
 }
 
+// ---- run execution (runs server-side; survives a page refresh) ------------
+// `session` tracks the live run; the actual work happens in a server worker
+// thread, so refreshing the page just re-attaches to the same run.
+let session = null;   // { runId, curCtx, numTargets }
+
+function newAgg(provider, totalCases) {
+  return {
+    startedAt: Date.now(), provider, totalCases: totalCases || 0,
+    doneCases: 0, passed: 0, completionTokens: 0, promptTokens: 0,
+    tpsSum: 0, tpsN: 0, cost: 0, costKnown: false,
+  };
+}
+
+function startRunUI() {
+  running = true;
+  session = { runId: null, curCtx: null, numTargets: 1 };
+  $("#run-btn").classList.add("hidden");
+  $("#stop-btn").classList.remove("hidden");
+  $("#stop-btn").disabled = false;
+  $("#stop-btn").textContent = "■ Stop";
+  $("#live-results").innerHTML = "";
+  $("#live-stats").classList.add("hidden");
+  $("#live-active").classList.add("hidden");
+  clearInterval(statsTimer);
+  statsTimer = setInterval(() => { if (session && session.curCtx) renderLiveStats(session.curCtx.agg); }, 250);
+}
+
+function endRunUI() {
+  clearInterval(statsTimer);
+  if (session && session.curCtx) renderLiveStats(session.curCtx.agg);
+  running = false; runAbort = null;
+  $("#run-btn").classList.remove("hidden");
+  $("#stop-btn").classList.add("hidden");
+  $("#live-active").classList.add("hidden");
+}
+
 async function stopRun() {
-  queueStopped = true;
   $("#stop-btn").disabled = true;
   $("#stop-btn").textContent = "■ Stopping…";
-  if (currentRunId) {
+  const rid = session && session.runId;
+  if (rid) {
     try {
       await fetch("/api/run/stop", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ run_id: currentRunId }),
+        body: JSON.stringify({ run_id: rid }),
       });
     } catch (e) { /* ignore */ }
   }
-  if (runAbort) { try { runAbort.abort(); } catch (e) { /* ignore */ } }
+  // Don't abort the stream — we want the saved / queue_done events to arrive.
+}
+
+// Read an NDJSON run stream (from POST /api/run or GET /api/run/stream).
+async function consumeStream(resp) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      dispatch(JSON.parse(line));
+    }
+  }
 }
 
 async function runAll() {
@@ -279,7 +332,7 @@ async function runAll() {
 
   // Targets: the queue, or — if empty — the currently selected model.
   let targets = (state.queue && state.queue.length)
-    ? state.queue.slice()
+    ? state.queue.map((t) => ({ provider: t.provider, model: t.model }))
     : (() => {
         const m = $("#model-select").value;
         return m ? [{ provider: state.provider, model: m }] : [];
@@ -295,97 +348,48 @@ async function runAll() {
     max_tokens: parseInt($("#param-maxtok").value, 10),
   };
 
-  running = true;
-  queueStopped = false;
-  $("#run-btn").classList.add("hidden");
-  $("#stop-btn").classList.remove("hidden");
-  $("#stop-btn").disabled = false;
-  $("#stop-btn").textContent = "■ Stop";
-  $("#live-results").innerHTML = "";
-  $("#live-stats").classList.add("hidden");
-  $("#live-active").classList.add("hidden");
-
-  try {
-    for (let i = 0; i < targets.length; i++) {
-      if (queueStopped) break;
-      await streamOneRun(targets[i], benchmark_ids, params, i, targets.length);
-    }
-    if (queueStopped) {
-      $("#queue-status").innerHTML = `<span class="warn">■ Queue stopped</span>`;
-    } else if (targets.length > 1) {
-      $("#queue-status").innerHTML = `✓ Queue complete — ${targets.length} models. See the <b>Leaderboard</b> to compare.`;
-    }
-  } finally {
-    running = false; currentRunId = null; runAbort = null;
-    $("#run-btn").classList.remove("hidden");
-    $("#stop-btn").classList.add("hidden");
-    $("#live-active").classList.add("hidden");
-  }
-}
-
-// Run a single (provider, model) target; resolves when its run finishes or is
-// cancelled. Each target is saved separately, so each becomes a leaderboard row.
-async function streamOneRun(target, benchmark_ids, params, idx, total) {
-  const { provider, model } = target;
-  const seq = ++runSeq;
-  currentRunId = null;
-  $("#progress-bar").style.width = "0%";
-  $("#live-stats").classList.remove("hidden");
-
-  // per-model section in the results area
-  const section = document.createElement("div");
-  section.className = "model-section";
-  const queueTag = total > 1 ? `<span class="ms-count">model ${idx + 1}/${total}</span>` : "";
-  section.innerHTML = `<div class="model-banner">
-      <span class="ms-prov">${providerIcon(provider)}</span>
-      <span class="ms-model">${escapeHtml(model)}</span>${queueTag}
-      <span class="ms-status" id="msstatus-${seq}">starting…</span>
-    </div><div class="ms-body" id="msbody-${seq}"></div>`;
-  $("#live-results").appendChild(section);
-
-  const agg = {
-    startedAt: Date.now(), provider, seq,
-    totalCases: state.benchmarks.filter((b) => benchmark_ids.includes(b.id)).reduce((a, b) => a + b.count, 0),
-    doneCases: 0, passed: 0, completionTokens: 0, promptTokens: 0,
-    tpsSum: 0, tpsN: 0, cost: 0, costKnown: false,
-  };
-  if (total > 1) $("#queue-status").innerHTML = `Running model <b>${idx + 1}/${total}</b>: ${escapeHtml(model)}`;
-  renderLiveStats(agg);
-  clearInterval(statsTimer);
-  statsTimer = setInterval(() => renderLiveStats(agg), 250);
-
-  const ctx = { seq, container: $("#msbody-" + seq), blocks: {}, agg, model, idx, total };
-
+  startRunUI();
   try {
     runAbort = new AbortController();
     const resp = await fetch("/api/run", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ provider, model, benchmark_ids, params }),
+      body: JSON.stringify({ targets, benchmark_ids, params }),
       signal: runAbort.signal,
     });
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        handleEvent(JSON.parse(line), ctx);
-      }
-    }
+    await consumeStream(resp);
   } catch (e) {
-    if (!(e && e.name === "AbortError")) {
-      const st = $("#msstatus-" + seq);
-      if (st) st.innerHTML = `<span class="warn">failed: ${escapeHtml(String(e))}</span>`;
-    }
+    if (!(e && e.name === "AbortError"))
+      $("#queue-status").innerHTML = `<span class="warn">Run failed: ${escapeHtml(String(e))}</span>`;
   } finally {
-    clearInterval(statsTimer);
-    renderLiveStats(agg);
+    endRunUI();
+  }
+}
+
+// On page load, re-attach to a run that's still going (e.g. after a refresh).
+async function reattachActiveRun() {
+  let active;
+  try {
+    const data = await fetch("/api/runs").then((r) => r.json());
+    active = (data.runs || []).find((r) => !r.done) || (data.runs || [])[0];
+  } catch (e) { return; }
+  if (!active) return;
+
+  // bring the Run tab forward
+  $$(".tab").forEach((x) => x.classList.remove("active"));
+  $$(".tab-panel").forEach((x) => x.classList.remove("active"));
+  $('.tab[data-tab="run"]').classList.add("active");
+  $("#tab-run").classList.add("active");
+
+  startRunUI();
+  session.runId = active.run_id;
+  $("#queue-status").innerHTML = `↻ Re-attached to a run already in progress…`;
+  try {
+    runAbort = new AbortController();
+    const resp = await fetch(`/api/run/stream?run_id=${encodeURIComponent(active.run_id)}&since=0`,
+      { signal: runAbort.signal });
+    await consumeStream(resp);
+  } catch (e) { /* ignore */ } finally {
+    endRunUI();
   }
 }
 
@@ -405,13 +409,54 @@ function renderLiveStats(agg) {
     `<div class="stat-chip"><span class="sk">${k}</span><span class="sv">${v}</span></div>`).join("");
 }
 
-function handleEvent(ev, ctx) {
-  const { seq, agg, blocks } = ctx;
+// Top-level dispatcher for the unified run stream (covers the whole queue).
+function dispatch(ev) {
   switch (ev.type) {
     case "run_started":
-      currentRunId = ev.run_id;
-      if (ev.total_cases) agg.totalCases = ev.total_cases;
-      break;
+      session.runId = ev.run_id;
+      session.numTargets = ev.num_targets || 1;
+      $("#queue-status").textContent = session.numTargets > 1
+        ? `Queue: ${session.numTargets} models` : "running…";
+      return;
+    case "target_start": {
+      const seq = ++runSeq;
+      const section = document.createElement("div");
+      section.className = "model-section";
+      const queueTag = ev.total > 1 ? `<span class="ms-count">model ${ev.index + 1}/${ev.total}</span>` : "";
+      section.innerHTML = `<div class="model-banner">
+          <span class="ms-prov">${providerIcon(ev.provider)}</span>
+          <span class="ms-model">${escapeHtml(ev.model)}</span>${queueTag}
+          <span class="ms-status" id="msstatus-${seq}">starting…</span>
+        </div><div class="ms-body" id="msbody-${seq}"></div>`;
+      $("#live-results").appendChild(section);
+      const agg = newAgg(ev.provider, ev.total_cases);
+      session.curCtx = { seq, container: $("#msbody-" + seq), blocks: {}, agg, model: ev.model, idx: ev.index, total: ev.total };
+      if (ev.total > 1) $("#queue-status").innerHTML = `Running model <b>${ev.index + 1}/${ev.total}</b>: ${escapeHtml(ev.model)}`;
+      $("#progress-bar").style.width = "0%";
+      $("#live-stats").classList.remove("hidden");
+      renderLiveStats(agg);
+      return;
+    }
+    case "queue_done":
+      if (ev.cancelled) $("#queue-status").innerHTML = `<span class="warn">■ Queue stopped</span>`;
+      else if ((session.numTargets || 1) > 1) $("#queue-status").innerHTML = `✓ Queue complete — ${session.numTargets} models. See the <b>Leaderboard</b> to compare.`;
+      else $("#queue-status").innerHTML = `✓ Done — saved. See the <b>Leaderboard</b>.`;
+      return;
+    case "error":
+      if (session.curCtx) {
+        const st = $("#msstatus-" + session.curCtx.seq);
+        if (st) st.innerHTML = `<span class="warn">${escapeHtml(ev.message)}</span>`;
+      }
+      return;
+    default:
+      if (session.curCtx) handleTargetEvent(ev, session.curCtx);
+  }
+}
+
+// Per-target events (one model's benchmarks) → rendered into that model's section.
+function handleTargetEvent(ev, ctx) {
+  const { seq, agg, blocks } = ctx;
+  switch (ev.type) {
     case "start": {
       const wrap = document.createElement("div");
       wrap.className = "result-block";
@@ -652,5 +697,6 @@ $("#refresh-benchmarks").addEventListener("click", loadBenchmarkDetails);
   renderQueue();
   await loadSettings();
   loadModels(state.provider);
-  loadBenchmarks();
+  await loadBenchmarks();
+  reattachActiveRun();   // resume a run that's still going (e.g. after a refresh)
 })();

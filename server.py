@@ -606,6 +606,126 @@ def get_result(rid):
 
 
 # --------------------------------------------------------------------------- #
+#  Run manager — runs execute in a background thread and buffer their events,
+#  so a run survives the browser disconnecting (e.g. a page refresh). Clients
+#  attach/re-attach to the live NDJSON event stream by run_id.
+# --------------------------------------------------------------------------- #
+FINISHED_RUN_TTL = 300  # keep finished runs around this long for late re-attach
+
+
+def _prune_runs_locked():
+    now = time.time()
+    for rid in list(RUNS.keys()):
+        r = RUNS[rid]
+        if r.get("done") and r.get("finished_at") and now - r["finished_at"] > FINISHED_RUN_TTL:
+            del RUNS[rid]
+
+
+def new_run(targets, benchmark_ids, params):
+    run_id = uuid.uuid4().hex[:12]
+    lock = threading.Lock()
+    selected = [get_benchmark(b) for b in benchmark_ids]
+    total_cases = sum(len(b.get("cases", [])) for b in selected if b)
+    run = {
+        "id": run_id,
+        "cancel": False,
+        "events": [],
+        "done": False,
+        "lock": lock,
+        "cond": threading.Condition(lock),
+        "targets": targets,
+        "benchmark_ids": benchmark_ids,
+        "params": params,
+        "total_cases_per_model": total_cases,
+        "started": time.time(),
+        "finished_at": None,
+    }
+    with RUNS_LOCK:
+        _prune_runs_locked()
+        RUNS[run_id] = run
+    return run
+
+
+def run_emit(run, ev):
+    with run["cond"]:
+        run["events"].append(ev)
+        run["cond"].notify_all()
+
+
+def run_worker(run):
+    """Execute every (provider, model) target in the run sequentially, saving
+    each separately and buffering all events. Runs in its own thread."""
+    run_id = run["id"]
+    benchmark_ids = run["benchmark_ids"]
+    params = run["params"]
+    targets = run["targets"]
+    total_cases = run["total_cases_per_model"]
+
+    def should_cancel():
+        return run["cancel"]
+
+    try:
+        run_emit(run, {
+            "type": "run_started", "run_id": run_id,
+            "targets": [{"provider": t.get("provider", "local"), "model": t.get("model")} for t in targets],
+            "num_targets": len(targets), "total_cases_per_model": total_cases,
+        })
+        cancelled = False
+        for idx, target in enumerate(targets):
+            if should_cancel():
+                cancelled = True
+                break
+            provider = target.get("provider", "local")
+            model = target.get("model")
+            run_emit(run, {"type": "target_start", "index": idx, "total": len(targets),
+                           "provider": provider, "model": model, "total_cases": total_cases})
+            summaries, all_cases, tcancel = [], [], False
+            for bid in benchmark_ids:
+                if should_cancel():
+                    tcancel = True
+                    break
+                bench = get_benchmark(bid)
+                if bench is None:
+                    run_emit(run, {"type": "error", "message": f"benchmark {bid} not found"})
+                    continue
+                summary, cases, was_cancelled = run_benchmark_stream(
+                    provider, model, bench, params, lambda ev: run_emit(run, ev), should_cancel)
+                summaries.append(summary)
+                for c in cases:
+                    c["benchmark_id"] = bid
+                    all_cases.append(c)
+                if was_cancelled:
+                    tcancel = True
+                    break
+            record = save_result(provider, model, summaries, all_cases, params, cancelled=tcancel)
+            run_emit(run, {"type": "saved", "index": idx, "result_id": record["id"],
+                           "provider": provider, "model": model,
+                           "overall_score": record["overall_score"], "passed": record["passed"],
+                           "answered": record["answered"], "total": record["total"],
+                           "cancelled": tcancel, "total_tokens": record["total_tokens"],
+                           "total_time_s": record["total_time_s"],
+                           "avg_tokens_per_second": record["avg_tokens_per_second"],
+                           "total_cost_usd": record["total_cost_usd"]})
+            if tcancel:
+                cancelled = True
+                break
+        run_emit(run, {"type": "queue_done", "run_id": run_id, "cancelled": cancelled})
+    except Exception as e:  # noqa: BLE001
+        run_emit(run, {"type": "fatal", "message": str(e)})
+    finally:
+        with run["cond"]:
+            run["done"] = True
+            run["finished_at"] = time.time()
+            run["cond"].notify_all()
+
+
+def start_run(targets, benchmark_ids, params):
+    run = new_run(targets, benchmark_ids, params)
+    threading.Thread(target=run_worker, args=(run,), daemon=True).start()
+    return run
+
+
+# --------------------------------------------------------------------------- #
 #  HTTP handler
 # --------------------------------------------------------------------------- #
 CONTENT_TYPES = {
@@ -694,6 +814,35 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(b)
             return
+        if path == "/api/runs":
+            # active (not yet finished) runs, so a refreshed page can re-attach
+            with RUNS_LOCK:
+                runs = [{
+                    "run_id": r["id"], "done": r["done"],
+                    "targets": [{"provider": t.get("provider", "local"), "model": t.get("model")}
+                                for t in r["targets"]],
+                    "num_targets": len(r["targets"]),
+                    "events_count": len(r["events"]),
+                    "started": r["started"],
+                } for r in RUNS.values() if not r["done"]]
+            runs.sort(key=lambda x: x["started"], reverse=True)
+            self._send_json({"runs": runs})
+            return
+        if path == "/api/run/stream":
+            qs = parse_qs(parsed.query)
+            rid = (qs.get("run_id") or [""])[0]
+            since = (qs.get("since") or ["0"])[0]
+            try:
+                since = max(0, int(since))
+            except ValueError:
+                since = 0
+            with RUNS_LOCK:
+                run = RUNS.get(rid)
+            if run is None:
+                self._send_json({"error": "run not found or expired"}, 404)
+            else:
+                self._stream_run(run, since=since)
+            return
         if path == "/api/results":
             self._send_json({"results": list_results()})
             return
@@ -752,84 +901,44 @@ class Handler(BaseHTTPRequestHandler):
     # -- streaming run --------------------------------------------------- #
     def _handle_run(self):
         body = self._read_body()
-        provider = body.get("provider", "local")
-        model = body.get("model")
+        targets = body.get("targets")
+        if not targets:  # legacy single-model form
+            model = body.get("model")
+            if model:
+                targets = [{"provider": body.get("provider", "local"), "model": model}]
+        targets = [t for t in (targets or []) if t.get("model")]
         bench_ids = body.get("benchmark_ids", [])
         params = body.get("params", {})
-        if not model or not bench_ids:
-            self._send_json({"error": "model and benchmark_ids are required"}, 400)
+        if not targets or not bench_ids:
+            self._send_json({"error": "targets (or model) and benchmark_ids are required"}, 400)
             return
+        run = start_run(targets, bench_ids, params)
+        self._stream_run(run, since=0)
 
+    def _stream_run(self, run, since=0):
+        """Stream a run's buffered NDJSON events from index `since`, following
+        until the run is done. Safe to call repeatedly (re-attach after refresh).
+        If the client disconnects, the run keeps going in its worker thread."""
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-
-        def emit(obj):
-            try:
-                self.wfile.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                raise
-
-        run_id = uuid.uuid4().hex[:12]
-        with RUNS_LOCK:
-            RUNS[run_id] = {"cancel": False}
-
-        def should_cancel():
-            with RUNS_LOCK:
-                run = RUNS.get(run_id)
-                return bool(run and run["cancel"])
-
-        # total cases up front so the client can show a global progress bar
-        selected = [get_benchmark(b) for b in bench_ids]
-        total_cases = sum(len(b.get("cases", [])) for b in selected if b)
-
-        summaries = []
-        all_cases = []
-        cancelled = False
+        i = since
         try:
-            emit({"type": "run_started", "run_id": run_id, "provider": provider,
-                  "model": model, "total_cases": total_cases,
-                  "num_benchmarks": len([b for b in selected if b])})
-            for bid in bench_ids:
-                if should_cancel():
-                    cancelled = True
+            while True:
+                with run["cond"]:
+                    while i >= len(run["events"]) and not run["done"]:
+                        run["cond"].wait(timeout=1.0)
+                    pending = run["events"][i:]
+                    done = run["done"]
+                for ev in pending:
+                    self.wfile.write((json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8"))
+                self.wfile.flush()
+                i += len(pending)
+                if done and i >= len(run["events"]):
                     break
-                bench = get_benchmark(bid)
-                if bench is None:
-                    emit({"type": "error", "message": f"benchmark {bid} not found"})
-                    continue
-                summary, cases, was_cancelled = run_benchmark_stream(
-                    provider, model, bench, params, emit, should_cancel)
-                summaries.append(summary)
-                for c in cases:
-                    c["benchmark_id"] = bid
-                    all_cases.append(c)
-                if was_cancelled:
-                    cancelled = True
-                    break
-            if cancelled:
-                emit({"type": "stopped", "run_id": run_id})
-            record = save_result(provider, model, summaries, all_cases, params, cancelled=cancelled)
-            emit({"type": "saved", "result_id": record["id"],
-                  "overall_score": record["overall_score"],
-                  "passed": record["passed"], "answered": record["answered"],
-                  "total": record["total"], "cancelled": cancelled,
-                  "total_tokens": record["total_tokens"],
-                  "total_time_s": record["total_time_s"],
-                  "avg_tokens_per_second": record["avg_tokens_per_second"],
-                  "total_cost_usd": record["total_cost_usd"]})
         except (BrokenPipeError, ConnectionResetError):
-            return  # client navigated away
-        except Exception as e:  # noqa: BLE001
-            try:
-                emit({"type": "fatal", "message": str(e)})
-            except Exception:  # noqa: BLE001
-                pass
-        finally:
-            with RUNS_LOCK:
-                RUNS.pop(run_id, None)
+            return  # client navigated away; worker thread continues
 
 
 def main():
