@@ -76,10 +76,15 @@ Closing the tab no longer kills the run.
 
 ### Comparing models (leaderboard)
 
-Every run is saved and listed on the **Leaderboard** tab as a sortable table:
-score, model, provider, speed (tok/s), cost, total time, and pass count. Queue a
-local model and an OpenRouter model together to compare quality vs. speed vs.
-price directly, side by side.
+The **Leaderboard** tab is a **consolidated matrix**: one row per model with a
+column for every benchmark, plus overall score, speed (tok/s), cost and total
+time. Runs are merged per model — if you run a model more than once (or run
+different benchmark subsets at different times), the **most recent run wins per
+benchmark**, so re-running just refreshes that cell. **Click any column header to
+sort** (by overall, by a single benchmark, by speed, cost, …); **click a
+benchmark cell** to open that run's full case-by-case breakdown. Queue a local
+model and an OpenRouter model together to compare quality vs. speed vs. price
+directly.
 
 ### Configuration
 
@@ -206,6 +211,7 @@ API endpoints (handy if you want to script runs):
 - `GET  /api/runs` — runs currently in progress (so a refreshed page can re-attach)
 - `GET  /api/run/stream?run_id=…&since=N` — (re)attach to a run's event stream from index N
 - `POST /api/run/stop` — `{ "run_id" }` cancels an in-flight run/queue
+- `GET  /api/leaderboard` — runs consolidated into one row per model, with a per-benchmark column matrix
 - `GET  /api/results` / `GET /api/results/{id}` — saved runs
 
 ---

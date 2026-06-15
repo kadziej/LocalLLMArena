@@ -610,33 +610,98 @@ function showCaseModal(r) {
 $("#modal-close").addEventListener("click", () => $("#modal").classList.add("hidden"));
 $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") $("#modal").classList.add("hidden"); });
 
-// ---- leaderboard ----------------------------------------------------------
+// ---- leaderboard (consolidated, one row per model, sortable) ---------------
+const BENCH_SHORT = {
+  gsm8k_math: "GSM8K", mmlu_mixed: "MMLU", arc_science: "ARC", commonsense: "Common",
+  truthfulqa: "Truthful", code_reasoning: "Code", instruction_following: "Instr",
+  hidden_premise: "Hidden", custom_example_trivia: "Capitals",
+  hard_math: "H-Math", hard_reasoning: "H-Reason", gpqa_science: "GPQA",
+  tokenizer_traps: "Tokens", hard_instruction: "H-Instr",
+};
+function shortBench(col) { return BENCH_SHORT[col.id] || (col.name || col.id).slice(0, 8); }
+
+let lbData = null;
+let lbSort = { key: "overall", dir: "desc" };
+
 async function loadHistory() {
-  const data = await fetch("/api/results").then((r) => r.json());
-  const list = $("#history-list");
-  if (!data.results.length) {
-    list.innerHTML = `<div class="empty">No runs yet. Run some benchmarks first.</div>`;
+  lbData = await fetch("/api/leaderboard").then((r) => r.json());
+  renderLeaderboard();
+}
+
+function lbColumns() {
+  // fixed columns + one per benchmark, returning sort accessors
+  const cols = [
+    { key: "model", label: "Model", type: "str", get: (r) => r.model, cls: "lb-sticky" },
+    { key: "provider", label: "Prov", type: "str", get: (r) => r.provider },
+    { key: "overall", label: "Overall", type: "num", get: (r) => r.overall_score },
+  ];
+  (lbData.columns || []).forEach((c) => cols.push({
+    key: "b:" + c.id, label: shortBench(c), title: c.name, type: "num", bench: c.id,
+    get: (r) => (r.benches[c.id] ? r.benches[c.id].score : null),
+  }));
+  cols.push({ key: "speed", label: "Speed", type: "num", get: (r) => r.avg_tokens_per_second });
+  cols.push({ key: "cost", label: "Cost", type: "num", get: (r) => r.total_cost_usd });
+  cols.push({ key: "time", label: "Time", type: "num", get: (r) => r.total_time_s });
+  cols.push({ key: "tested", label: "Done", title: "benchmarks tested · runs", type: "num", get: (r) => r.benchmarks_tested });
+  return cols;
+}
+
+function renderLeaderboard() {
+  const host = $("#history-list");
+  if (!lbData || !lbData.rows.length) {
+    host.innerHTML = `<div class="empty">No runs yet. Run some benchmarks first.</div>`;
     return;
   }
-  const rows = data.results.map((r) => {
-    const when = new Date(r.timestamp).toLocaleString();
-    const prov = r.provider === "openrouter"
-      ? `<span class="prov-tag or">☁️ OpenRouter</span>` : `<span class="prov-tag local">🖥️ local</span>`;
-    const stopped = r.cancelled ? ` <span class="warn">(stopped)</span>` : "";
-    return `<tr class="lb-row" data-id="${r.id}">
-      <td class="lb-score" style="color:var(--${scoreColorVar(r.overall_score)})">${r.overall_score}%</td>
-      <td><div class="lb-model">${escapeHtml(r.model)}${stopped}</div><div class="muted lb-when">${when}</div></td>
-      <td>${prov}</td>
-      <td>${r.avg_tokens_per_second != null ? r.avg_tokens_per_second + " tok/s" : "—"}</td>
-      <td>${r.total_cost_usd != null ? fmtCost(r.total_cost_usd) : (r.provider === "openrouter" ? "—" : "free")}</td>
-      <td>${fmtDur(r.total_time_s)}</td>
-      <td>${r.passed}/${r.answered ?? r.total}</td>
-    </tr>`;
+  const cols = lbColumns();
+  const col = cols.find((c) => c.key === lbSort.key) || cols[2];
+  const dir = lbSort.dir === "asc" ? 1 : -1;
+  const rows = lbData.rows.slice().sort((a, b) => {
+    let va = col.get(a), vb = col.get(b);
+    if (col.type === "str") return (va || "").localeCompare(vb || "") * dir;
+    // numeric: nulls always sink to the bottom regardless of direction
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    return (va - vb) * dir;
+  });
+
+  const arrow = (c) => c.key === lbSort.key ? (lbSort.dir === "asc" ? " ▲" : " ▼") : "";
+  const head = cols.map((c) =>
+    `<th class="${c.cls || ""} ${c.bench ? "lb-bench" : ""} ${c.key === lbSort.key ? "sorted" : ""}" data-key="${c.key}"`
+    + `${c.title ? ` title="${escapeHtml(c.title)}"` : ""}>${escapeHtml(c.label)}${arrow(c)}</th>`).join("");
+
+  const body = rows.map((r) => {
+    const prov = r.provider === "openrouter" ? `<span class="prov-tag or">☁️</span>` : `<span class="prov-tag local">🖥️</span>`;
+    let tds = `<td class="lb-sticky lb-modelcell">
+        <div class="lb-model">${escapeHtml(r.model)}</div>
+        <div class="muted lb-when">${r.run_count} run${r.run_count > 1 ? "s" : ""} · ${new Date(r.last_run).toLocaleDateString()}</div>
+      </td>`;
+    tds += `<td>${prov}</td>`;
+    tds += `<td class="lb-score" style="color:var(--${scoreColorVar(r.overall_score)})">${r.overall_score}%</td>`;
+    (lbData.columns || []).forEach((c) => {
+      const e = r.benches[c.id];
+      if (!e) { tds += `<td class="lb-cell empty-cell">·</td>`; return; }
+      tds += `<td class="lb-cell ${scoreClass(e.score)}" data-rid="${e.result_id}" title="${e.passed}/${e.answered}">${e.score}%</td>`;
+    });
+    tds += `<td>${r.avg_tokens_per_second != null ? r.avg_tokens_per_second : "—"}</td>`;
+    tds += `<td>${r.total_cost_usd != null ? fmtCost(r.total_cost_usd) : (r.provider === "openrouter" ? "—" : "free")}</td>`;
+    tds += `<td>${fmtDur(r.total_time_s)}</td>`;
+    tds += `<td class="muted">${r.benchmarks_tested}</td>`;
+    return `<tr>${tds}</tr>`;
   }).join("");
-  list.innerHTML = `<table class="leaderboard">
-    <thead><tr><th>Score</th><th>Model</th><th>Provider</th><th>Speed</th><th>Cost</th><th>Time</th><th>Passed</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
-  $$(".lb-row").forEach((row) => row.addEventListener("click", () => showRunDetail(row.dataset.id)));
+
+  host.innerHTML = `<div class="lb-scroll"><table class="leaderboard consolidated">
+    <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+    <div class="muted lb-hint">Click a column header to sort · click a benchmark cell to open that run's details</div>`;
+
+  host.querySelectorAll("th[data-key]").forEach((th) => th.addEventListener("click", () => {
+    const key = th.dataset.key;
+    if (lbSort.key === key) lbSort.dir = lbSort.dir === "asc" ? "desc" : "asc";
+    else lbSort = { key, dir: key === "model" || key === "provider" ? "asc" : "desc" };
+    renderLeaderboard();
+  }));
+  host.querySelectorAll(".lb-cell[data-rid]").forEach((td) =>
+    td.addEventListener("click", () => showRunDetail(td.dataset.rid)));
 }
 $("#refresh-history").addEventListener("click", loadHistory);
 

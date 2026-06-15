@@ -604,6 +604,89 @@ def list_results():
     return out
 
 
+def _iter_results():
+    if not os.path.isdir(RESULTS_DIR):
+        return
+    for fn in sorted(os.listdir(RESULTS_DIR)):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(RESULTS_DIR, fn), "r", encoding="utf-8") as f:
+                yield json.load(f)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def build_leaderboard():
+    """Consolidate every saved run into one row per (provider, model), with a
+    cell per benchmark. When a model has been run more than once, the most
+    recent run wins for each benchmark (so re-running refreshes that cell)."""
+    bench_order = {b["id"]: i for i, b in enumerate(all_benchmarks())}
+    bench_name = {b["id"]: b["name"] for b in all_benchmarks()}
+
+    results = sorted(_iter_results(), key=lambda r: r.get("timestamp", ""))
+    models = {}      # (provider, model) -> aggregate
+    seen = {}        # bench_id -> display name
+
+    for r in results:
+        prov = r.get("provider", "local")
+        model = r.get("model", "?")
+        ts = r.get("timestamp", "")
+        rid = r.get("id")
+        key = (prov, model)
+        m = models.setdefault(key, {"provider": prov, "model": model, "benches": {},
+                                    "last_run": ts, "run_ids": set()})
+        m["run_ids"].add(rid)
+        if ts > m["last_run"]:
+            m["last_run"] = ts
+        for b in r.get("benchmarks", []):
+            bid = b.get("benchmark_id") or b.get("benchmark_name")
+            seen[bid] = b.get("benchmark_name", bid)
+            entry = {
+                "score": b.get("score"),
+                "passed": b.get("passed"),
+                "answered": b.get("answered", b.get("total")),
+                "avg_tokens_per_second": b.get("avg_tokens_per_second"),
+                "total_cost_usd": b.get("total_cost_usd"),
+                "total_time_s": b.get("total_time_s"),
+                "total_tokens": b.get("total_tokens"),
+                "timestamp": ts, "result_id": rid,
+            }
+            prev = m["benches"].get(bid)
+            if prev is None or ts >= prev["timestamp"]:
+                m["benches"][bid] = entry
+
+    col_ids = sorted(seen.keys(), key=lambda b: (bench_order.get(b, 999), seen[b]))
+    columns = [{"id": b, "name": bench_name.get(b, seen[b])} for b in col_ids]
+
+    rows = []
+    for m in models.values():
+        benches = m["benches"]
+        passed = sum((e["passed"] or 0) for e in benches.values())
+        answered = sum((e["answered"] or 0) for e in benches.values())
+        tps = [e["avg_tokens_per_second"] for e in benches.values() if e["avg_tokens_per_second"] is not None]
+        costs = [e["total_cost_usd"] for e in benches.values() if e["total_cost_usd"] is not None]
+        times = [e["total_time_s"] for e in benches.values() if e["total_time_s"] is not None]
+        toks = [e["total_tokens"] for e in benches.values() if e["total_tokens"] is not None]
+        rows.append({
+            "provider": m["provider"], "model": m["model"],
+            "overall_score": round(100.0 * passed / answered, 1) if answered else 0.0,
+            "passed": passed, "answered": answered,
+            "benches": {bid: {"score": e["score"], "passed": e["passed"], "answered": e["answered"],
+                              "avg_tokens_per_second": e["avg_tokens_per_second"],
+                              "total_cost_usd": e["total_cost_usd"], "result_id": e["result_id"]}
+                        for bid, e in benches.items()},
+            "avg_tokens_per_second": round(sum(tps) / len(tps), 1) if tps else None,
+            "total_cost_usd": round(sum(costs), 6) if costs else None,
+            "total_time_s": round(sum(times), 1) if times else None,
+            "total_tokens": sum(toks) if toks else None,
+            "benchmarks_tested": len(benches),
+            "run_count": len(m["run_ids"]),
+            "last_run": m["last_run"],
+        })
+    return {"columns": columns, "rows": rows}
+
+
 def get_result(rid):
     path = os.path.join(RESULTS_DIR, rid + ".json")
     if not os.path.isfile(path):
@@ -849,6 +932,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "run not found or expired"}, 404)
             else:
                 self._stream_run(run, since=since)
+            return
+        if path == "/api/leaderboard":
+            self._send_json(build_leaderboard())
             return
         if path == "/api/results":
             self._send_json({"results": list_results()})

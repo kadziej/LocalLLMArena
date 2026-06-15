@@ -248,6 +248,37 @@ code { background: var(--bg-elev2); padding: 1px 6px; border-radius: 4px; font-s
 .prov-tag.or { color: #c4b5fd; }
 .prov-tag.local { color: #7dd3fc; }
 
+/* consolidated leaderboard matrix */
+.lb-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+.leaderboard.consolidated { border-collapse: separate; border-spacing: 0; min-width: 100%; }
+.leaderboard.consolidated th {
+  position: sticky; top: 0; z-index: 2; background: var(--bg-elev2); cursor: pointer;
+  white-space: nowrap; user-select: none; padding: 9px 10px; border-bottom: 1px solid var(--border);
+}
+.leaderboard.consolidated th:hover { color: var(--text); background: var(--border); }
+.leaderboard.consolidated th.sorted { color: var(--accent); }
+.leaderboard.consolidated th.lb-bench { text-align: center; font-size: 10px; }
+.leaderboard.consolidated td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: center; white-space: nowrap; }
+.leaderboard.consolidated tbody tr:hover td { background: var(--bg-elev2); }
+
+/* sticky model column (header + cells) */
+.lb-sticky { position: sticky; left: 0; z-index: 1; background: var(--bg-elev); text-align: left !important; }
+.leaderboard.consolidated th.lb-sticky { z-index: 3; background: var(--bg-elev2); }
+.leaderboard.consolidated tbody tr:hover td.lb-sticky { background: var(--bg-elev2); }
+.lb-modelcell { min-width: 200px; max-width: 300px; }
+.lb-modelcell .lb-model { font-weight: 600; white-space: normal; word-break: break-word; }
+.lb-when { font-size: 11px; }
+.lb-score { font-weight: 700; font-size: 15px; }
+
+/* benchmark cells — colored by score */
+.lb-cell { font-weight: 600; cursor: pointer; }
+.lb-cell.good { color: var(--green); }
+.lb-cell.mid { color: var(--amber); }
+.lb-cell.bad { color: var(--red); }
+.lb-cell[data-rid]:hover { background: var(--border) !important; outline: 1px solid var(--accent); }
+.empty-cell { color: var(--muted); cursor: default; }
+.lb-hint { font-size: 12px; margin-top: 8px; }
+
 /* model queue */
 .queue-list { margin-top: 10px; }
 .queue-head { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
