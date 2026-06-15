@@ -346,9 +346,13 @@ def score_case(scoring, expected, output, prompt=None):
         ok = all(normalize(e) in out for e in exps)
         return ok, f"required all of {exps!r}"
 
-    if scoring == "regex":
+    if scoring in ("regex", "regex_cs"):
+        # "regex" is case-insensitive; "regex_cs" is case-sensitive (needed to
+        # grade format/case constraints like "reply in UPPERCASE").
+        flags = re.DOTALL | (re.IGNORECASE if scoring == "regex" else 0)
         try:
-            return bool(re.search(expected, output or "", re.IGNORECASE | re.DOTALL)), f"regex {expected!r}"
+            ok = bool(re.search(expected, output or "", flags))
+            return ok, f"{scoring} {expected!r}"
         except re.error as e:
             return False, f"bad regex: {e}"
 
@@ -400,9 +404,10 @@ def build_messages(bench, case):
     system = case.get("system_prompt") or bench.get("system_prompt")
     if not system:
         # A light default that nudges models toward gradeable answers.
-        if bench.get("scoring") == "multiple_choice":
+        scoring = case.get("scoring") or bench.get("scoring")
+        if scoring == "multiple_choice":
             system = "Answer the multiple choice question. End with 'Answer: <letter>'."
-        elif bench.get("scoring") == "numeric":
+        elif scoring == "numeric":
             system = "Solve the problem. End your reply with 'Answer: <number>'."
     if system:
         messages.append({"role": "system", "content": system})
@@ -453,7 +458,9 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
             if res.get("cancelled"):
                 cancelled = True
                 break
-            ok, detail = score_case(bench["scoring"], case.get("expected"),
+            # a case may override the benchmark's scoring type
+            scoring = case.get("scoring") or bench["scoring"]
+            ok, detail = score_case(scoring, case.get("expected"),
                                     res["content"], case.get("prompt"))
             if res["latency_s"] is not None:
                 latencies.append(res["latency_s"])

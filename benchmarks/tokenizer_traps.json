@@ -1,0 +1,23 @@
+{
+  "id": "tokenizer_traps",
+  "name": "Character & Token Traps",
+  "category": "Reasoning",
+  "description": "Letter-counting, spelling and word-manipulation tasks that LLMs famously get wrong because they see tokens, not characters. Mixed numeric / multiple-choice scoring.",
+  "scoring": "numeric",
+  "system_prompt": "Work character by character. End with 'Answer: <value>'.",
+  "default_params": { "temperature": 0, "max_tokens": 1024 },
+  "cases": [
+    { "id": "strawberry_r", "prompt": "How many times does the letter 'r' appear in the word 'strawberry'?", "expected": "3" },
+    { "id": "mississippi_s", "prompt": "How many times does the letter 's' appear in the word 'Mississippi'?", "expected": "4" },
+    { "id": "beekeeper_e", "prompt": "How many times does the letter 'e' appear in the word 'beekeeper'?", "expected": "5" },
+    { "id": "long_word_len", "prompt": "How many letters are in the word 'antidisestablishmentarianism'?", "expected": "28" },
+    { "id": "vowels", "prompt": "How many vowels (a, e, i, o, u) are in the word 'education'?", "expected": "5" },
+    { "id": "distinct", "prompt": "How many distinct (different) letters are used in the word 'banana'?", "expected": "3" },
+    { "id": "word_count", "prompt": "How many words are in this sentence: 'The quick brown fox jumps over the lazy dog'?", "expected": "9" },
+    { "id": "th_count", "prompt": "How many times does the two-letter sequence 'th' appear in the phrase 'the theme of this theory'?", "expected": "4" },
+    { "id": "fourth_letter", "scoring": "multiple_choice", "system_prompt": "Answer the multiple choice question. End with 'Answer: <letter>'.", "prompt": "What is the 4th letter of the word 'computer'?\nA) m\nB) p\nC) u\nD) t", "expected": "B" },
+    { "id": "reverse_world", "scoring": "multiple_choice", "system_prompt": "Answer the multiple choice question. End with 'Answer: <letter>'.", "prompt": "What is the word 'WORLD' spelled backwards?\nA) DRLOW\nB) DLROW\nC) DLORW\nD) WORLD", "expected": "B" },
+    { "id": "last_letter", "scoring": "multiple_choice", "system_prompt": "Answer the multiple choice question. End with 'Answer: <letter>'.", "prompt": "What is the last letter of the word 'reasoning'?\nA) n\nB) g\nC) i\nD) o", "expected": "B" },
+    { "id": "anagram", "scoring": "multiple_choice", "system_prompt": "Answer the multiple choice question. End with 'Answer: <letter>'.", "prompt": "Which of the following is an anagram of the word 'LISTEN'?\nA) SILENT\nB) TINSEL\nC) Both SILENT and TINSEL\nD) Neither", "expected": "C" }
+  ]
+}

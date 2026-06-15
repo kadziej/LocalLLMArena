@@ -1,0 +1,23 @@
+{
+  "id": "gpqa_science",
+  "name": "Graduate Science (GPQA-style)",
+  "category": "Knowledge",
+  "description": "Upper-undergraduate / graduate-level physics, chemistry, biology and stats — deeper than high-school MMLU. Multiple choice, scored by chosen letter.",
+  "scoring": "multiple_choice",
+  "system_prompt": "Answer the question. Reason briefly, then end with 'Answer: <letter>'.",
+  "default_params": { "temperature": 0, "max_tokens": 1024 },
+  "cases": [
+    { "id": "qho", "prompt": "(Quantum mechanics) What is the ground-state energy of a one-dimensional quantum harmonic oscillator of angular frequency ω?\nA) 0\nB) (1/2)ℏω\nC) ℏω\nD) 2ℏω", "expected": "B" },
+    { "id": "sn1", "prompt": "(Organic chemistry) What is the rate-determining step of a typical SN1 reaction?\nA) Nucleophilic attack on the substrate\nB) Formation of the carbocation intermediate\nC) Deprotonation of the product\nD) Simultaneous bond formation and bond breaking", "expected": "B" },
+    { "id": "okazaki", "prompt": "(Molecular biology) Okazaki fragments are synthesized on which strand during DNA replication?\nA) The leading strand\nB) The lagging strand\nC) Only the parental template\nD) Both new strands equally", "expected": "B" },
+    { "id": "permanganate", "prompt": "(Inorganic chemistry) What is the oxidation state of manganese in the permanganate ion, MnO4^-?\nA) +4\nB) +5\nC) +6\nD) +7", "expected": "D" },
+    { "id": "double_slit", "prompt": "(Optics) In a double-slit experiment, if the slit separation d is increased while the wavelength is held constant, the spacing between adjacent bright fringes will:\nA) Increase\nB) Decrease\nC) Remain unchanged\nD) Drop to zero", "expected": "B" },
+    { "id": "gibbs", "prompt": "(Thermodynamics) For a spontaneous process occurring at constant temperature and pressure, which thermodynamic quantity of the system must decrease?\nA) Enthalpy\nB) Entropy\nC) Gibbs free energy\nD) Internal energy", "expected": "C" },
+    { "id": "gluon", "prompt": "(Particle physics) Which gauge boson mediates the strong interaction between quarks?\nA) Photon\nB) Gluon\nC) W boson\nD) Graviton", "expected": "B" },
+    { "id": "t_dist", "prompt": "(Statistics) As the degrees of freedom of a Student's t-distribution increase toward infinity, the distribution approaches:\nA) A uniform distribution\nB) A standard normal distribution\nC) A chi-squared distribution\nD) An exponential distribution", "expected": "B" },
+    { "id": "hardy_weinberg", "prompt": "(Population genetics) A population is in Hardy-Weinberg equilibrium and the frequency of a recessive allele is 0.3. What fraction of the population is expected to be heterozygous?\nA) 0.09\nB) 0.21\nC) 0.42\nD) 0.49", "expected": "C" },
+    { "id": "benzene", "prompt": "(Organic chemistry) What is the hybridization of each carbon atom in benzene?\nA) sp3\nB) sp2\nC) sp\nD) sp3d", "expected": "B" },
+    { "id": "spontaneity_T", "prompt": "(Physical chemistry) A reaction has ΔH = -50 kJ/mol and ΔS = -100 J/(mol·K). Considering ΔG = ΔH - TΔS, in what temperature regime is the reaction non-spontaneous?\nA) At all temperatures\nB) Above 500 K\nC) Below 500 K\nD) It is spontaneous at all temperatures", "expected": "B" },
+    { "id": "gauss", "prompt": "(Electromagnetism) Gauss's law states that the net electric flux through a closed surface is proportional to:\nA) The total charge enclosed by the surface\nB) The electric current through the surface\nC) The enclosed magnetic field\nD) The rate of change of magnetic flux", "expected": "A" }
+  ]
+}

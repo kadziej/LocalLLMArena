@@ -1,0 +1,24 @@
+{
+  "id": "hard_math",
+  "name": "Hard Math (Competition / Number Theory)",
+  "category": "Math & Reasoning",
+  "description": "Harder than GSM8K: modular arithmetic, combinatorics, number theory and algebra that trip up models which ace grade-school word problems. Numeric scoring.",
+  "scoring": "numeric",
+  "system_prompt": "Solve the problem step by step. End your reply with a line 'Answer: <number>'.",
+  "default_params": { "temperature": 0, "max_tokens": 2048 },
+  "cases": [
+    { "id": "modexp", "prompt": "What is the remainder when 7^100 is divided by 13?", "expected": "9" },
+    { "id": "last2_3pow", "prompt": "What are the last two digits of 3^2024? (Give the two-digit number, e.g. for ...07 answer 7.)", "expected": "81" },
+    { "id": "units_digit", "prompt": "What is the units digit of 7^2023?", "expected": "3" },
+    { "id": "coprime_count", "prompt": "How many integers from 1 to 100 inclusive are divisible by neither 2 nor 3?", "expected": "33" },
+    { "id": "sigma360", "prompt": "What is the sum of all positive divisors of 360 (including 1 and 360 itself)?", "expected": "1170" },
+    { "id": "trailing_zeros", "prompt": "How many trailing zeros are there at the end of 25! (25 factorial)?", "expected": "6" },
+    { "id": "gcd", "prompt": "What is the greatest common divisor of 1071 and 462?", "expected": "21" },
+    { "id": "banana_perm", "prompt": "How many distinct ways can the letters of the word BANANA be arranged?", "expected": "60" },
+    { "id": "log_eq", "prompt": "Solve for x: log base 2 of x plus log base 2 of (x - 6) equals 4. Give the valid (positive) solution.", "expected": "8" },
+    { "id": "crt", "prompt": "Find the smallest positive integer that leaves remainder 2 when divided by 5 and remainder 3 when divided by 7.", "expected": "17" },
+    { "id": "diagonals", "prompt": "How many diagonals does a convex polygon with 12 sides have?", "expected": "54" },
+    { "id": "func_comp", "prompt": "Let f(x) = 2x + 3 and g(x) = x^2. Compute f(g(3)) - g(f(1)).", "expected": "-4" },
+    { "id": "coin_prob", "prompt": "A fair coin is flipped 5 times. What is the probability of getting exactly 3 heads? Give the answer as a decimal rounded to 4 decimal places.", "expected": "0.3125" }
+  ]
+}

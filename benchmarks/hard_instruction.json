@@ -1,0 +1,20 @@
+{
+  "id": "hard_instruction",
+  "name": "Hard Instruction Following (Compound Constraints)",
+  "category": "Instruction Following",
+  "description": "Strict, compound output-format constraints (case, counts, structure) graded case-sensitively with regular expressions. Punishes any extra preamble or formatting.",
+  "scoring": "regex_cs",
+  "default_params": { "temperature": 0, "max_tokens": 600 },
+  "cases": [
+    { "id": "stop_go", "prompt": "Output exactly the word STOP in uppercase, then a single space, then the word go in lowercase. Output nothing else.", "expected": "^\\s*STOP go\\s*$" },
+    { "id": "four_fruits", "prompt": "List exactly four fruits separated by ' > ' (a space, a greater-than sign, a space). Use only lowercase letters. Output nothing else.", "expected": "^\\s*[a-z]+ > [a-z]+ > [a-z]+ > [a-z]+\\s*$" },
+    { "id": "six_t_words", "prompt": "Write a sentence of exactly six words in which every word begins with the letter 't'. Output only the sentence (a single trailing period is allowed).", "expected": "^\\s*[Tt]\\w* [Tt]\\w* [Tt]\\w* [Tt]\\w* [Tt]\\w* [Tt]\\w*\\.?\\s*$" },
+    { "id": "palindrome3", "prompt": "Output a single three-letter lowercase palindrome (a word spelled the same forwards and backwards), and nothing else.", "expected": "^\\s*([a-z])[a-z]\\1\\s*$" },
+    { "id": "descending", "prompt": "Output the integers from 1 to 5 in descending order, separated by a comma and a single space, with nothing else.", "expected": "^\\s*5, 4, 3, 2, 1\\s*$" },
+    { "id": "two_sentences", "prompt": "Write exactly two sentences. The first must end with a question mark and the second must end with an exclamation mark. Output only the two sentences.", "expected": "^\\s*[^?!]*\\?\\s+[^?!]*!\\s*$" },
+    { "id": "spell_hello", "prompt": "Spell the word HELLO with each letter in uppercase separated by periods, like X.Y.Z. Output only that.", "expected": "^\\s*H\\.E\\.L\\.L\\.O\\s*$" },
+    { "id": "hashes", "prompt": "Output exactly seven '#' characters on a single line and nothing else.", "expected": "^\\s*#{7}\\s*$" },
+    { "id": "because_once", "prompt": "Write a single sentence that uses the word 'because' exactly once and ends with a period. Output only the sentence.", "expected": "^(?:(?!because).)*because(?:(?!because).)*\\.\\s*$" },
+    { "id": "nasa_bang", "prompt": "Output the acronym NASA in uppercase immediately followed by a single exclamation mark, and nothing else.", "expected": "^\\s*NASA!\\s*$" }
+  ]
+}

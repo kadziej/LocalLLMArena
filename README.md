@@ -93,6 +93,8 @@ addresses out of the public repo.
 
 ## What's included
 
+**Core set** (good for ranging weaker→mid models; strong 27B models largely saturate these):
+
 | Benchmark | Category | Scoring | What it tests |
 |-----------|----------|---------|---------------|
 | Grade-School Math (GSM8K style) | Math & Reasoning | `numeric` | Multi-step arithmetic word problems |
@@ -102,7 +104,24 @@ addresses out of the public repo.
 | TruthfulQA (Misconceptions) | Reasoning | `multiple_choice` | Resisting common myths |
 | Code Output Prediction | Coding | `contains` | Tracing short Python snippets |
 | Instruction Following | Instruction Following | `regex` | Obeying precise format constraints |
+| Hidden-Premise Reasoning | Reasoning | `multiple_choice` | Purpose-over-heuristic traps (e.g. car-wash) |
 | Custom Example — World Capitals | Custom | `contains` | Template you can copy |
+
+**Hard set** (added because strong models saturate the core set — these stay discriminating):
+
+| Benchmark | Category | Scoring | What it tests |
+|-----------|----------|---------|---------------|
+| Hard Math (Competition / Number Theory) | Math & Reasoning | `numeric` | Modular arithmetic, combinatorics, number theory |
+| Hard Reasoning (Traps & Counterintuition) | Reasoning | `multiple_choice` | CRT, Monty Hall, knights-and-knaves, conjunction fallacy |
+| Graduate Science (GPQA-style) | Knowledge | `multiple_choice` | Upper-undergrad / grad physics, chem, bio, stats |
+| Character & Token Traps | Reasoning | `numeric` + `multiple_choice` | Letter counting / spelling (the classic tokenizer blind spot) |
+| Hard Instruction Following | Instruction Following | `regex_cs` | Strict compound output-format constraints |
+
+The hard set was designed after observing three 26–27B models score **88–99%** on
+the core set, with discrimination surviving only in math, trap-reasoning, and
+instruction-following — so the hard set leans into exactly those, plus the
+character-level tasks LLMs notoriously fail. Answer keys for the objective
+benchmarks (math, character traps) are verified programmatically.
 
 These are **representative samples** written in the style of the well-known public
 benchmarks, sized to run quickly against a local model. To run the *full* official
@@ -134,17 +153,21 @@ Drop a new `.json` file into the [`benchmarks/`](benchmarks/) folder and click
 - `id` is optional (defaults to the filename).
 - `system_prompt` and `default_params` are optional.
 - Each case may also carry its own `system_prompt` to override the benchmark's.
+- Each case may also carry its own `scoring` to override the benchmark's, so one
+  file can mix scoring types (e.g. `numeric` counting questions plus
+  `multiple_choice` ones, as in **Character & Token Traps**).
 
 ### Scoring types
 
 | `scoring` | `expected` is… | Passes when… |
 |-----------|----------------|--------------|
-| `multiple_choice` | a letter `"A"`–`"J"` | the letter extracted from the answer matches |
+| `multiple_choice` | a letter `"A"`–`"J"` | the letter extracted from the answer matches (constrained to the options the prompt offers) |
 | `numeric` | a number (string or number) | the final number in the answer equals it (tiny tolerance) |
 | `exact_match` | a string | the whole answer matches (case/space-insensitive) |
 | `contains` | a string **or list of strings** | the answer contains it (any of, if a list) |
 | `contains_all` | a list of strings | the answer contains every string |
-| `regex` | a regex pattern | the pattern matches the raw answer (case-insensitive, dotall) |
+| `regex` | a regex pattern | the pattern matches the raw answer (**case-insensitive**, dotall) |
+| `regex_cs` | a regex pattern | the pattern matches the raw answer (**case-sensitive**, dotall) — for grading case/format constraints |
 
 For `multiple_choice` and `numeric`, the runner adds a light default system
 prompt nudging the model to end with `Answer: <…>`, which makes extraction

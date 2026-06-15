@@ -1,0 +1,23 @@
+{
+  "id": "hard_reasoning",
+  "name": "Hard Reasoning (Traps & Counterintuition)",
+  "category": "Reasoning",
+  "description": "Cognitive-reflection and classic logic puzzles where the intuitive answer is wrong. Multiple choice, scored by chosen letter.",
+  "scoring": "multiple_choice",
+  "system_prompt": "Think carefully — the obvious answer is often wrong. Reason it through, then end with 'Answer: <letter>'.",
+  "default_params": { "temperature": 0, "max_tokens": 1024 },
+  "cases": [
+    { "id": "bat_ball", "prompt": "A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?\nA) $0.10\nB) $0.05\nC) $1.00\nD) $0.01", "expected": "B" },
+    { "id": "machines", "prompt": "If it takes 5 machines 5 minutes to make 5 widgets, how long would it take 100 machines to make 100 widgets?\nA) 100 minutes\nB) 20 minutes\nC) 5 minutes\nD) 1 minute", "expected": "C" },
+    { "id": "lily_pads", "prompt": "In a lake there is a patch of lily pads. Every day the patch doubles in size. If it takes 48 days for the patch to cover the entire lake, how many days does it take to cover half the lake?\nA) 24\nB) 47\nC) 46\nD) 12", "expected": "B" },
+    { "id": "monty_hall", "prompt": "On a game show there are 3 doors; a car is behind one and goats behind the other two. You pick door 1. The host, who knows what is behind each door, opens door 3 to reveal a goat and offers you the chance to switch to door 2. To maximize your chance of winning the car, what should you do?\nA) Switch to door 2 (probability 2/3)\nB) Stay with door 1 (it is now 50/50)\nC) It makes no difference\nD) Stay with door 1 (switching lowers the odds)", "expected": "A" },
+    { "id": "knights_knaves", "prompt": "On an island, knights always tell the truth and knaves always lie. You meet two people, A and B. A says: 'B is a knave.' B says: 'We are both knights.' What are A and B?\nA) Both knights\nB) Both knaves\nC) A is a knight and B is a knave\nD) A is a knave and B is a knight", "expected": "C" },
+    { "id": "two_children", "prompt": "A family has exactly two children. You are told that at least one of them is a boy. Assuming each child is independently a boy or girl with probability 1/2, what is the probability that both children are boys?\nA) 1/2\nB) 1/3\nC) 1/4\nD) 2/3", "expected": "B" },
+    { "id": "race_overtake", "prompt": "You are running a race. You overtake the person in second place. What position are you in now?\nA) First\nB) Second\nC) Third\nD) It depends on the number of runners", "expected": "B" },
+    { "id": "father", "prompt": "Tom is the father of Alex, but Alex is not the son of Tom. How is this possible?\nA) It is impossible\nB) Alex is Tom's daughter\nC) Alex was adopted\nD) Tom is Alex's stepfather", "expected": "B" },
+    { "id": "feb_days", "prompt": "Some months have 31 days and some have 30. How many months have 28 days?\nA) 1\nB) 2\nC) 7\nD) All 12", "expected": "D" },
+    { "id": "linda", "prompt": "Linda is 31, single, outspoken and very bright. She majored in philosophy and was deeply concerned with issues of social justice. Which is more probable?\nA) Linda is a bank teller\nB) Linda is a bank teller and is active in the feminist movement\nC) They are exactly equally probable\nD) It cannot be determined", "expected": "A" },
+    { "id": "polar_bear", "prompt": "A man builds a house in which all four walls face south. A bear walks past the house. What color is the bear?\nA) Brown\nB) White\nC) Black\nD) It cannot be determined", "expected": "B" },
+    { "id": "self_ref", "prompt": "How many letters are in the correct answer to this question?\nA) Four\nB) Five\nC) Six\nD) Three", "expected": "A" }
+  ]
+}
