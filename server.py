@@ -163,6 +163,8 @@ def chat_completion(provider, model, messages, params, should_cancel=None, on_to
     t0 = time.time()
     ttft = None
     parts = []
+    reasoning_parts = []
+    reasoning_chunks = 0
     chunk_tokens = 0
     usage = {}
     finish_reason = None
@@ -188,6 +190,19 @@ def chat_completion(provider, model, messages, params, should_cancel=None, on_to
                 usage = obj["usage"]
             for ch in obj.get("choices") or []:
                 delta = ch.get("delta") or {}
+                # Reasoning models stream their thinking in a side channel:
+                # LM Studio calls it `reasoning_content`, OpenRouter `reasoning`.
+                # It arrives before any content, so it - not the first content
+                # token - is the true time to first token.
+                rpiece = delta.get("reasoning_content") or delta.get("reasoning")
+                if rpiece:
+                    if ttft is None:
+                        ttft = time.time() - t0
+                    reasoning_parts.append(rpiece)
+                    chunk_tokens += 1
+                    reasoning_chunks += 1
+                    if on_token:
+                        on_token(rpiece, chunk_tokens, "reasoning")
                 piece = delta.get("content")
                 if piece:
                     if ttft is None:
@@ -195,12 +210,18 @@ def chat_completion(provider, model, messages, params, should_cancel=None, on_to
                     parts.append(piece)
                     chunk_tokens += 1
                     if on_token:
-                        on_token(piece, chunk_tokens)
+                        on_token(piece, chunk_tokens, "content")
                 if ch.get("finish_reason"):
                     finish_reason = ch["finish_reason"]
 
     end = time.time()
     content = "".join(parts)
+    # Thinking reaches us two ways - the side channel above and inline tags in
+    # the content - and a model may use either. Merge both into one transcript
+    # and keep `answer` (what gets scored) free of all of it.
+    inline_reasoning, answer = split_reasoning(content)
+    reasoning = "\n".join(
+        p for p in ("".join(reasoning_parts).strip(), inline_reasoning) if p).strip()
     latency = end - t0
     completion_tokens = usage.get("completion_tokens") or (chunk_tokens or None)
     prompt_tokens = usage.get("prompt_tokens")
@@ -226,8 +247,25 @@ def chat_completion(provider, model, messages, params, should_cancel=None, on_to
         elif latency > 0:
             tps = completion_tokens / latency
 
+    # How much of the completion budget went to thinking. Exact when the API
+    # reports it or when thinking came over the side channel; for inline tags we
+    # can only apportion by character share, so flag that as an estimate.
+    details = usage.get("completion_tokens_details") or {}
+    reasoning_tokens = details.get("reasoning_tokens")
+    reasoning_exact = reasoning_tokens is not None
+    if reasoning_tokens is None and reasoning_chunks:
+        reasoning_tokens, reasoning_exact = reasoning_chunks, True
+    if reasoning_tokens is None and inline_reasoning and completion_tokens and content:
+        reasoning_tokens = int(round(
+            completion_tokens * len(inline_reasoning) / len(content)))
+        reasoning_exact = False
+
     return {
         "content": content,
+        "answer": answer,
+        "reasoning": reasoning,
+        "reasoning_tokens": reasoning_tokens,
+        "reasoning_tokens_exact": reasoning_exact,
         "latency_s": round(latency, 3),
         "ttft_s": round(ttft, 3) if ttft is not None else None,
         "tokens": completion_tokens,
@@ -245,6 +283,60 @@ def chat_completion(provider, model, messages, params, should_cancel=None, on_to
 # --------------------------------------------------------------------------- #
 LETTER_RE = re.compile(r"\b([A-J])\b")
 NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+
+
+REASONING_TAGS = ("think", "thinking", "thought", "reason", "reasoning",
+                  "reflection", "scratchpad")
+_OPEN_TAG_RE = re.compile(
+    r"<\s*(" + "|".join(REASONING_TAGS) + r")\s*>", re.IGNORECASE)
+_CLOSE_TAG_RE = re.compile(
+    r"<\s*/\s*(?:" + "|".join(REASONING_TAGS) + r")\s*>", re.IGNORECASE)
+
+
+def split_reasoning(text):
+    """Separate a model's chain-of-thought from its actual answer.
+
+    Reasoning models emit thinking either in a dedicated `reasoning_content`
+    stream field (handled in chat_completion) or inline in the content, wrapped
+    in tags like <think>...</think>. Scoring must only ever see the answer:
+    thinking is full of restated options, discarded candidate numbers and the
+    words "the answer is ...", every one of which corrupts letter/number
+    extraction and `contains` matching.
+
+    Returns (reasoning, answer). Two ragged real-world shapes are handled:
+    a chat template that pre-fills the opening tag, so the reply starts mid-
+    thought and only the closing tag appears; and an opening tag that is never
+    closed, which is what a max_tokens truncation mid-thought looks like -
+    there, everything after the tag is reasoning and the answer is empty.
+    """
+    if not text:
+        return "", text or ""
+
+    if not _OPEN_TAG_RE.search(text):
+        # Template pre-filled the opening tag: reasoning runs until the close.
+        cm = _CLOSE_TAG_RE.search(text)
+        if cm:
+            return text[:cm.start()].strip(), text[cm.end():].strip()
+        return "", text.strip()
+
+    reasoning, answer, pos = [], [], 0
+    while True:
+        m = _OPEN_TAG_RE.search(text, pos)
+        if not m:
+            answer.append(text[pos:])
+            break
+        answer.append(text[pos:m.start()])
+        close = re.compile(r"<\s*/\s*" + re.escape(m.group(1)) + r"\s*>",
+                           re.IGNORECASE)
+        cm = close.search(text, m.end())
+        if not cm:  # truncated mid-thought - no answer was ever produced
+            reasoning.append(text[m.end():])
+            break
+        reasoning.append(text[m.end():cm.start()])
+        pos = cm.end()
+
+    return ("\n".join(p.strip() for p in reasoning if p.strip()).strip(),
+            "".join(answer).strip())
 
 
 def normalize(text):
@@ -429,6 +521,7 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
     latencies, ttfts, tps_list = [], [], []
     comp_tokens_sum = 0
     prompt_tokens_sum = 0
+    reasoning_tokens_sum = 0
     cost_sum = 0.0
     cost_known = False
     case_results = []
@@ -447,9 +540,9 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
         merged.update(bench.get("default_params", {}))
         merged.update(params or {})
 
-        def on_token(piece, count):
+        def on_token(piece, count, kind="content"):
             emit({"type": "token", "benchmark_id": bench["id"],
-                  "index": i, "piece": piece, "n": count})
+                  "index": i, "piece": piece, "n": count, "kind": kind})
 
         try:
             messages = build_messages(bench, case)
@@ -460,8 +553,18 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
                 break
             # a case may override the benchmark's scoring type
             scoring = case.get("scoring") or bench["scoring"]
-            ok, detail = score_case(scoring, case.get("expected"),
-                                    res["content"], case.get("prompt"))
+            answer = res.get("answer") or ""
+            if not answer.strip() and res.get("reasoning"):
+                # The model was still thinking when generation stopped, so there
+                # is no answer to grade. Say so instead of reporting a mystery
+                # "no number found" - the fix is almost always a bigger budget.
+                ok = False
+                detail = ("no answer: still reasoning when generation stopped "
+                          f"(finish_reason={res.get('finish_reason')}) - "
+                          "raise max_tokens")
+            else:
+                ok, detail = score_case(scoring, case.get("expected"),
+                                        answer, case.get("prompt"))
             if res["latency_s"] is not None:
                 latencies.append(res["latency_s"])
             if res.get("ttft_s") is not None:
@@ -470,6 +573,7 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
                 tps_list.append(res["tokens_per_second"])
             comp_tokens_sum += res.get("tokens") or 0
             prompt_tokens_sum += res.get("prompt_tokens") or 0
+            reasoning_tokens_sum += res.get("reasoning_tokens") or 0
             if res.get("cost_usd") is not None:
                 cost_sum += res["cost_usd"]
                 cost_known = True
@@ -479,7 +583,10 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
                 "id": case_id,
                 "prompt": case["prompt"],
                 "expected": case.get("expected"),
-                "output": res["content"],
+                "output": answer,
+                "reasoning": res.get("reasoning") or "",
+                "reasoning_tokens": res.get("reasoning_tokens"),
+                "reasoning_tokens_exact": res.get("reasoning_tokens_exact"),
                 "passed": ok,
                 "detail": detail,
                 "latency_s": res["latency_s"],
@@ -524,6 +631,7 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
         "avg_tokens_per_second": _avg(tps_list),
         "total_completion_tokens": comp_tokens_sum,
         "total_prompt_tokens": prompt_tokens_sum,
+        "total_reasoning_tokens": reasoning_tokens_sum,
         "total_tokens": comp_tokens_sum + prompt_tokens_sum,
         "total_time_s": total_time,
         "total_cost_usd": round(cost_sum, 6) if cost_known else None,
@@ -541,6 +649,7 @@ def save_result(provider, model, summaries, all_cases, params, cancelled=False):
     passed = sum(s["passed"] for s in summaries)
     comp_tokens = sum(s.get("total_completion_tokens") or 0 for s in summaries)
     prompt_tokens = sum(s.get("total_prompt_tokens") or 0 for s in summaries)
+    reasoning_tokens = sum(s.get("total_reasoning_tokens") or 0 for s in summaries)
     total_time = round(sum(s.get("total_time_s") or 0 for s in summaries), 3)
     tps_vals = [s.get("avg_tokens_per_second") for s in summaries if s.get("avg_tokens_per_second")]
     costs = [s.get("total_cost_usd") for s in summaries if s.get("total_cost_usd") is not None]
@@ -557,6 +666,7 @@ def save_result(provider, model, summaries, all_cases, params, cancelled=False):
         "passed": passed,
         "total_completion_tokens": comp_tokens,
         "total_prompt_tokens": prompt_tokens,
+        "total_reasoning_tokens": reasoning_tokens,
         "total_tokens": comp_tokens + prompt_tokens,
         "total_time_s": total_time,
         "avg_tokens_per_second": round(sum(tps_vals) / len(tps_vals), 1) if tps_vals else None,
@@ -1036,7 +1146,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    port = int(CONFIG.get("server_port", 8080))
+    port = int(os.environ.get("PORT") or CONFIG.get("server_port", 8080))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     url = f"http://localhost:{port}"
     print("=" * 64)

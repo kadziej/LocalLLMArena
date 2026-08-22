@@ -208,7 +208,9 @@ $("#select-none").addEventListener("click", () => $$(".bench-cb").forEach((c) =>
 let running = false;
 let runAbort = null;
 let statsTimer = null;
-let activeBuffer = "";   // streaming output text for the focal panel
+let activeBuffer = "";   // streaming answer text for the focal panel
+let thinkBuffer = "";    // streaming chain-of-thought, when the model emits one
+let thinkTokens = 0;
 
 $("#run-btn").addEventListener("click", runAll);
 $("#stop-btn").addEventListener("click", stopRun);
@@ -474,6 +476,11 @@ function handleTargetEvent(ev, ctx) {
     case "case_start": {
       // focal panel: show the prompt going in, reset the streaming output area
       activeBuffer = "";
+      thinkBuffer = "";
+      thinkTokens = 0;
+      $("#la-think-wrap").classList.add("hidden");
+      $("#la-think").textContent = "";
+      $("#la-rtoks").textContent = "";
       $("#live-active").classList.remove("hidden");
       const who = ctx.total > 1 ? `${ctx.model} · ` : "";
       $("#la-head").textContent = `${who}${ev.benchmark_id} · case ${ev.index + 1} / ${ev.total} · generating…`;
@@ -485,7 +492,18 @@ function handleTargetEvent(ev, ctx) {
       break;
     }
     case "token": {
-      // every token streamed from the model, appended live
+      // every token streamed from the model, appended live. Reasoning models
+      // emit thinking first on its own channel - route it to the think pane so
+      // the panel shows progress instead of sitting empty until the answer.
+      if (ev.kind === "reasoning") {
+        thinkBuffer += ev.piece;
+        thinkTokens++;
+        $("#la-think-wrap").classList.remove("hidden");
+        const th = $("#la-think");
+        if (th) { th.textContent = thinkBuffer; th.scrollTop = th.scrollHeight; }
+        $("#la-rtoks").textContent = `${thinkTokens} tok`;
+        break;
+      }
       activeBuffer += ev.piece;
       const t = $("#la-text");
       if (t) t.textContent = activeBuffer;
@@ -572,6 +590,7 @@ function renderCaseRow(r) {
   if (r.latency_s != null) metaBits.push(`${r.latency_s}s`);
   if (r.tokens != null) metaBits.push(`${r.tokens} tok`);
   if (r.tokens_per_second != null) metaBits.push(`${r.tokens_per_second} tok/s`);
+  if (r.reasoning_tokens) metaBits.push(`🧠 ${r.reasoning_tokens}`);
   if (r.cost_usd != null && r.cost_usd > 0) metaBits.push(fmtCost(r.cost_usd));
   div.innerHTML = `${mark}<span class="cprompt">${escapeHtml(firstLine(r.prompt))}</span>`
     + `<span class="clat">${escapeHtml(metaBits.join(" · "))}</span>`;
@@ -584,6 +603,15 @@ function firstLine(s) {
   return line.length > 90 ? line.slice(0, 90) + "…" : line;
 }
 
+// Thinking is shown collapsed: it is the first thing you want when a case fails
+// unexpectedly, and the last thing you want in the way when it passes.
+function reasoningBlock(r) {
+  if (!r.reasoning) return "";
+  const n = r.reasoning_tokens != null ? ` · ${r.reasoning_tokens} tok` : "";
+  return `<details class="reasoning"><summary>🧠 Show reasoning${n} `
+    + `(excluded from scoring)</summary><pre>${escapeHtml(r.reasoning)}</pre></details>`;
+}
+
 function showCaseModal(r) {
   const exp = Array.isArray(r.expected) ? r.expected.join(" | ") : r.expected;
   const metricRows = [
@@ -591,6 +619,8 @@ function showCaseModal(r) {
     ["Time to first token", r.ttft_s != null ? r.ttft_s + " s" : "—"],
     ["Speed", r.tokens_per_second != null ? r.tokens_per_second + " tok/s" : "—"],
     ["Completion tokens", r.tokens ?? "—"],
+    ["Reasoning tokens", r.reasoning_tokens != null
+      ? r.reasoning_tokens + (r.reasoning_tokens_exact === false ? " (est.)" : "") : "—"],
     ["Prompt tokens", r.prompt_tokens ?? "—"],
     ["Total tokens", r.total_tokens ?? "—"],
     ["Cost", r.cost_usd != null ? fmtCost(r.cost_usd) : "—"],
@@ -603,7 +633,8 @@ function showCaseModal(r) {
     </div>
     <div class="kv"><div class="k">Prompt</div><pre>${escapeHtml(r.prompt)}</pre></div>
     <div class="kv"><div class="k">Expected</div><pre>${escapeHtml(exp)}</pre></div>
-    <div class="kv"><div class="k">Model output</div><pre>${escapeHtml(r.output)}</pre></div>
+    ${reasoningBlock(r)}
+    <div class="kv"><div class="k">Answer (this is what was scored)</div><pre>${escapeHtml(r.output)}</pre></div>
     <div class="kv"><div class="k">Scoring detail</div><pre>${escapeHtml(r.detail)}</pre></div>`;
   $("#modal").classList.remove("hidden");
 }

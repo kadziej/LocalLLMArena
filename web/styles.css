@@ -229,6 +229,14 @@ code { background: var(--bg-elev2); padding: 1px 6px; border-radius: 4px; font-s
   margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 13px;
   height: 200px; overflow-y: auto; line-height: 1.45;
 }
+/* thinking stream: present but visually subordinate to the answer */
+.la-think { color: var(--muted); font-style: italic; height: 96px !important; opacity: .85; }
+#la-think-wrap { margin-bottom: 9px; }
+.think-badge { color: var(--muted); font-size: 11px; }
+details.reasoning { margin-top: 4px; }
+details.reasoning summary { cursor: pointer; color: var(--muted); font-size: 12px; padding: 4px 0; }
+details.reasoning summary:hover { color: var(--accent); }
+details.reasoning pre { color: var(--muted); font-style: italic; }
 .cursor { animation: blink 1s steps(1) infinite; color: var(--accent); font-weight: 700; }
 @keyframes blink { 50% { opacity: 0; } }
 

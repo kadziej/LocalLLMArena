@@ -55,6 +55,40 @@ Detailed metrics are captured per case and aggregated per benchmark and per run:
 Click any question row to inspect its full prompt, expected answer, model
 output, and all metrics.
 
+### Reasoning models
+
+Reasoning models (Qwen3, DeepSeek-R1, gpt-oss, Gemma "thinking" builds, the
+OpenRouter `:thinking` variants …) emit a chain-of-thought before their actual
+answer. The app separates the two, and **only the answer is ever scored**:
+
+- **Both transports are handled.** Thinking arrives either on a dedicated stream
+  field (`reasoning_content` in LM Studio, `reasoning` on OpenRouter) or inline
+  in the content wrapped in `<think>…</think>` tags. Tag variants (`<thinking>`,
+  `<reasoning>`, `<reflection>`, `<scratchpad>`, any case) are recognised, as is
+  the common chat-template quirk of pre-filling the opening tag so only the
+  closing tag appears in the reply.
+- **Scoring sees the answer only.** This matters: thinking is full of restated
+  options, rejected candidate numbers and the phrase "the answer is …". Grading
+  the raw text lets a guess the model *talked itself out of* win, and can fail a
+  case whose format constraint (e.g. "reply in UPPERCASE") the answer satisfies
+  perfectly.
+- **Live view shows the thinking.** A 🧠 *Thinking* pane streams the chain-of-
+  thought above the answer pane, so a long thinking phase looks like progress
+  rather than a frozen panel.
+- **TTFT is honest.** Time-to-first-token is measured from the first token of
+  *any* kind. Timing it from the first answer token would silently fold the whole
+  thinking phase into "latency to first token".
+- **Reasoning tokens are counted**, per case and totalled per benchmark and run
+  (`total_reasoning_tokens`) — that is what a thinking model actually costs you.
+  The count is exact when it comes from the API or the stream side-channel, and
+  marked *(est.)* when apportioned from inline tags.
+- **Truncated thoughts are diagnosed.** If `max_tokens` runs out mid-thought
+  there is no answer to grade, and the case says exactly that instead of a
+  confusing "no number found".
+
+Each case stores its `reasoning` alongside its `output`; open a question row and
+expand **🧠 Show reasoning** to read what the model was thinking.
+
 ### Queue several models
 
 Use **➕ Add to queue** to line up multiple models — any mix of local (LM Studio)
@@ -93,6 +127,10 @@ at `http://localhost:1234`). Your machine-specific **LM Studio URL** and
 **OpenRouter API key** live in `settings.local.json` (gitignored), edited from
 the **Settings** tab or via `POST /api/settings`. This keeps secrets and private
 addresses out of the public repo.
+
+The listen port comes from `server_port` in `config.json`; set the `PORT`
+environment variable to override it for a single launch (handy when 8080 is
+already taken, or when a launcher assigns the port).
 
 ---
 
@@ -190,6 +228,7 @@ server.py            Pure-stdlib HTTP server. Serves the web UI and a small JSON
 benchmarks/*.json    One file per benchmark (see format above).
 results/*.json       One file per run, powering the Leaderboard tab.
 web/                 index.html + app.js + styles.css — no framework, no build.
+tests/               stdlib unittest suite (scoring, extraction, reasoning split).
 config.json          Generic defaults (committed). Points at localhost.
 settings.local.json  Your LM Studio URL + OpenRouter key (gitignored, never committed).
 ```
@@ -206,13 +245,28 @@ API endpoints (handy if you want to script runs):
 - `GET  /api/benchmarks/{id}` — full benchmark incl. cases
 - `POST /api/run` — `{ "targets": [{provider, model}, ...], "benchmark_ids": [...], "params": {...} }`
   starts a background run (queue) and streams its NDJSON events. Events: `run_started`,
-  `target_start` (per model), `start`/`case_start`/`token`/`case`/`done` (per benchmark),
+  `target_start` (per model), `start`/`case_start`/`token`/`case`/`done` (per benchmark; each `token`
+  event carries `kind`: `"content"` or `"reasoning"`),
   `saved` (per model), `queue_done`. Still accepts the legacy `{ provider, model }` form.
 - `GET  /api/runs` — runs currently in progress (so a refreshed page can re-attach)
 - `GET  /api/run/stream?run_id=…&since=N` — (re)attach to a run's event stream from index N
 - `POST /api/run/stop` — `{ "run_id" }` cancels an in-flight run/queue
 - `GET  /api/leaderboard` — runs consolidated into one row per model, with a per-benchmark column matrix
 - `GET  /api/results` / `GET /api/results/{id}` — saved runs
+
+---
+
+## Tests
+
+Still zero-dependency — the suite is plain `unittest` from the standard library:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+It covers answer extraction, every scoring type, and the reasoning/answer split,
+including regression cases that show what goes wrong when chain-of-thought is
+graded as if it were the answer.
 
 ---
 
@@ -223,6 +277,9 @@ API endpoints (handy if you want to script runs):
   rigorous numbers.
 - Scoring for open-ended tasks (`contains`/`regex`) is heuristic. The multiple-choice
   and numeric benchmarks are the most robust.
+- A model that reasons **without** any tag or side-channel marker (plain prose
+  thinking, then an answer) can't be split automatically — that is what the
+  default "End with 'Answer: <…>'" system prompt is for.
 - `temperature: 0` is recommended for reproducible benchmarking.
 - **OpenRouter costs real money.** Cost shown is what OpenRouter reports for the
   run. Watch `max_tokens` and benchmark sizes when testing expensive models.

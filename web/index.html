@@ -95,7 +95,13 @@
           <pre id="la-prompt"></pre>
         </div>
         <div class="la-pane">
-          <div class="la-k">◀ Output (streaming) <span id="la-toks" class="la-toks"></span></div>
+          <!-- reasoning models think before they answer; show that stream too,
+               otherwise the panel looks frozen for the whole thinking phase -->
+          <div id="la-think-wrap" class="hidden">
+            <div class="la-k">🧠 Thinking <span id="la-rtoks" class="la-toks"></span></div>
+            <pre id="la-think" class="la-think"></pre>
+          </div>
+          <div class="la-k">◀ Answer (streaming) <span id="la-toks" class="la-toks"></span></div>
           <pre id="la-output"><span id="la-cursor" class="cursor">▋</span></pre>
         </div>
       </div>
