@@ -103,10 +103,12 @@ def benchmark_fingerprint(bench):
 def atomic_write_json(path, obj):
     """Write JSON so that `path` always holds either the old or the new
     complete content - never a truncated mix."""
+    path = os.path.abspath(path)
     d = os.path.dirname(path)
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".part")
     try:
+        os.chmod(tmp, 0o644)  # mkstemp creates 0600; match a normal file
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(obj, f, indent=2, ensure_ascii=False)
             f.flush()
@@ -142,6 +144,34 @@ def _avg(xs, nd=3):
     return round(sum(xs) / len(xs), nd) if xs else None
 
 
+def decode_tps(tokens, decode_s):
+    """Generation speed, or None when the decode window is too short to
+    measure (a few tokens, or output that arrived in one buffered burst)."""
+    if not tokens or tokens < 4 or decode_s is None or decode_s <= 0.15:
+        return None
+    return tokens / decode_s
+
+
+def _case_decode(c):
+    d = c.get("decode_s")
+    if d is None and c.get("latency_s") is not None and c.get("ttft_s") is not None:
+        d = c["latency_s"] - c["ttft_s"]      # older records: derive it
+    return d
+
+
+def speed_of(cases):
+    """Token-weighted generation speed over the cases where it is measurable:
+    total decode tokens / total decode time. Unlike a mean of per-case rates,
+    one tiny answer can't drag it around."""
+    toks = secs = 0.0
+    for c in cases:
+        d = _case_decode(c)
+        if decode_tps(c.get("tokens"), d) is not None:
+            toks += c["tokens"]
+            secs += d
+    return round(toks / secs, 1) if secs else None
+
+
 def summarize_cases(cases):
     """Aggregate metrics for a list of case results. Pure function of the
     cases, so a summary can always be recomputed from a stored record."""
@@ -159,7 +189,7 @@ def summarize_cases(cases):
         "score": round(100.0 * passed / answered, 1) if answered else 0.0,
         "avg_latency_s": _avg(latencies),
         "avg_ttft_s": _avg([c.get("ttft_s") for c in cases]),
-        "avg_tokens_per_second": _avg([c.get("tokens_per_second") for c in cases]),
+        "avg_tokens_per_second": speed_of(cases),
         "total_completion_tokens": comp,
         "total_prompt_tokens": prompt,
         "total_reasoning_tokens": sum(c.get("reasoning_tokens") or 0 for c in cases),
@@ -175,7 +205,6 @@ def build_record(rid, started_at, provider, model, params, summaries, cases, sta
     passed = sum(s.get("passed") or 0 for s in summaries)
     comp = sum(s.get("total_completion_tokens") or 0 for s in summaries)
     prompt = sum(s.get("total_prompt_tokens") or 0 for s in summaries)
-    tps = [s.get("avg_tokens_per_second") for s in summaries if s.get("avg_tokens_per_second")]
     costs = [s.get("total_cost_usd") for s in summaries if s.get("total_cost_usd") is not None]
     return {
         "schema_version": SCHEMA_VERSION,
@@ -198,7 +227,7 @@ def build_record(rid, started_at, provider, model, params, summaries, cases, sta
         "total_reasoning_tokens": sum(s.get("total_reasoning_tokens") or 0 for s in summaries),
         "total_tokens": comp + prompt,
         "total_time_s": round(sum(s.get("total_time_s") or 0 for s in summaries), 3),
-        "avg_tokens_per_second": round(sum(tps) / len(tps), 1) if tps else None,
+        "avg_tokens_per_second": speed_of(cases),
         "total_cost_usd": round(sum(costs), 6) if costs else None,
         "benchmarks": summaries,
         "cases": cases,
@@ -244,6 +273,15 @@ def upgrade_record(r, fallback_id=None):
         c.setdefault("raw_output", c["output"])
         c.setdefault("detail", "")
 
+    # Speed is a derived display figure, not a measurement, so recompute it
+    # with the current definition (older versions mixed load time into it).
+    for b in benches:
+        bc = [c for c in cases if c["benchmark_id"] == b["benchmark_id"]]
+        if bc:
+            b["avg_tokens_per_second"] = speed_of(bc)
+    if cases:
+        r["avg_tokens_per_second"] = speed_of(cases)
+
     r.setdefault("total", sum(b["total"] for b in benches))
     r.setdefault("answered", sum(b["answered"] for b in benches))
     r.setdefault("passed", sum(b["passed"] for b in benches))
@@ -276,7 +314,13 @@ def scan(results_dir):
     records, unreadable = [], []
     if not os.path.isdir(results_dir):
         return records, unreadable
-    for fn in sorted(os.listdir(results_dir)):
+    try:
+        names = sorted(os.listdir(results_dir))
+    except OSError as e:
+        # e.g. macOS privacy protection on ~/Documents or ~/Desktop
+        unreadable.append({"file": results_dir, "error": f"cannot list folder: {e}"})
+        return records, unreadable
+    for fn in names:
         if not fn.endswith(".json") or fn.startswith("."):
             continue
         try:

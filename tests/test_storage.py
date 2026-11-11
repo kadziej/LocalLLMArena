@@ -154,6 +154,18 @@ class TestDamagedFiles(TmpResults):
                          ["20260101-000000-broken.json"])
         self.assertTrue(os.path.isfile(bad))
 
+    def test_unlistable_folder_is_reported_not_a_crash(self):
+        real = os.listdir
+
+        def listdir(path):
+            if os.path.abspath(path) == os.path.abspath(self.dir):
+                raise PermissionError(1, "Operation not permitted")
+            return real(path)
+        with mock.patch.object(os, "listdir", listdir):
+            lb = server.build_leaderboard()
+        self.assertEqual(lb["storage"]["runs"], 0)
+        self.assertIn("cannot list folder", lb["storage"]["unreadable"][0]["error"])
+
     def test_result_id_cannot_escape_the_results_dir(self):
         for rid in ("../config", "..", "a/b", ""):
             self.assertIsNone(storage.result_path(self.dir, rid))

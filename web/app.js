@@ -65,8 +65,8 @@ async function loadSettings() {
     updateEndpointLabel();
     if (s.default_params) {
       if (s.default_params.temperature != null) $("#param-temp").value = s.default_params.temperature;
-      if (s.default_params.max_tokens != null) $("#param-maxtok").value = s.default_params.max_tokens;
     }
+    if (s.reasoning_budget != null) $("#param-thinkbudget").value = s.reasoning_budget;
   } catch (e) {
     $("#endpoint-label").textContent = "settings error";
   }
@@ -345,10 +345,12 @@ async function runAll() {
     if (!confirm("The queue includes OpenRouter models but no API key is set (Settings tab). Those runs will fail. Continue anyway?")) return;
   }
 
-  const params = {
-    temperature: parseFloat($("#param-temp").value),
-    max_tokens: parseInt($("#param-maxtok").value, 10),
-  };
+  const params = { temperature: parseFloat($("#param-temp").value) };
+  // blank = let each benchmark use its own answer budget
+  const maxTok = parseInt($("#param-maxtok").value, 10);
+  if (Number.isFinite(maxTok) && maxTok > 0) params.max_tokens = maxTok;
+  const think = parseInt($("#param-thinkbudget").value, 10);
+  if (Number.isFinite(think) && think >= 0) params.reasoning_budget = think;
 
   startRunUI();
   try {
@@ -471,6 +473,14 @@ function handleTargetEvent(ev, ctx) {
         <div class="case-table" id="table-${seq}-${ev.benchmark_id}"></div>`;
       ctx.container.appendChild(wrap);
       blocks[ev.benchmark_id] = { passed: 0, seen: 0, total: ev.total };
+      break;
+    }
+    case "case_retry": {
+      // model turned out to think and ran out of room: same case, bigger budget
+      activeBuffer = ""; thinkBuffer = ""; thinkTokens = 0;
+      $("#la-think").textContent = ""; $("#la-rtoks").textContent = "";
+      $("#la-text").textContent = ""; $("#la-toks").textContent = "";
+      $("#la-head").textContent += ` · retrying with thinking budget (${ev.max_tokens} tok)`;
       break;
     }
     case "case_start": {
@@ -617,7 +627,7 @@ function showCaseModal(r) {
   const metricRows = [
     ["Latency (total)", r.latency_s != null ? r.latency_s + " s" : "—"],
     ["Time to first token", r.ttft_s != null ? r.ttft_s + " s" : "—"],
-    ["Speed", r.tokens_per_second != null ? r.tokens_per_second + " tok/s" : "—"],
+    ["Speed", r.tokens_per_second != null ? r.tokens_per_second + " tok/s" : "— (too short to measure)"],
     ["Completion tokens", r.tokens ?? "—"],
     ["Reasoning tokens", r.reasoning_tokens != null
       ? r.reasoning_tokens + (r.reasoning_tokens_exact === false ? " (est.)" : "") : "—"],
@@ -625,6 +635,8 @@ function showCaseModal(r) {
     ["Total tokens", r.total_tokens ?? "—"],
     ["Cost", r.cost_usd != null ? fmtCost(r.cost_usd) : "—"],
     ["Finish reason", r.finish_reason ?? "—"],
+    ["Token budget", r.max_tokens != null
+      ? r.max_tokens + (r.retried_with_thinking_budget ? " (retried)" : "") : "—"],
   ];
   $("#modal-content").innerHTML = `
     <h2>${r.passed ? "✓ Passed" : "✗ Failed"} <span class="muted">· ${escapeHtml(r.id)}</span></h2>

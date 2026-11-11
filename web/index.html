@@ -59,8 +59,13 @@
           </label>
           <label>
             <span class="param-name">Max tokens <span class="info" title="The maximum number of tokens (≈ word pieces) the model may generate in its answer. Generation stops when this limit is reached even if the model isn't finished (you'll see finish_reason = 'length'). Raise it for long answers like essays or chain-of-thought; lower it to cap cost and time.">ⓘ</span></span>
-            <input type="number" id="param-maxtok" value="1024" step="64" min="16" />
-            <span class="param-help">Upper limit on answer length. Too low truncates reasoning; higher costs more time/$.</span>
+            <input type="number" id="param-maxtok" value="" placeholder="auto" step="64" min="16" />
+            <span class="param-help">Answer budget. Blank = each benchmark's own default (128–2048). Set a number to force it for all.</span>
+          </label>
+          <label>
+            <span class="param-name">Thinking budget <span class="info" title="Reasoning models (gemma-4, qwen3, deepseek-r1, o-series…) think before answering, and that thinking counts against max tokens. Models known to think get this many extra tokens on top of the answer budget. A model is recognised from any earlier run; the first time one is seen thinking and runs out of room, that case is retried once with the extra budget. 0 = no allowance.">ⓘ</span></span>
+            <input type="number" id="param-thinkbudget" value="4096" step="512" min="0" />
+            <span class="param-help">Extra tokens for models that reason before answering. Non-thinking models are unaffected.</span>
           </label>
         </div>
       </div>

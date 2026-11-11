@@ -249,18 +249,12 @@ def chat_completion(provider, model, messages, params, should_cancel=None, on_to
     if cost is None and provider == "local":
         cost = 0.0
 
-    # tokens/sec over the decode window (first token -> last token), the figure
-    # people usually quote. For very short or buffered outputs the window can be
-    # a sub-millisecond measurement artifact, so only trust it when there are
-    # enough tokens over a long enough window; otherwise fall back to the stable
-    # whole-call throughput (completion tokens / total latency).
-    tps = None
-    if completion_tokens:
-        decode_window = (end - (t0 + ttft)) if ttft is not None else None
-        if decode_window and decode_window > 0.15 and completion_tokens >= 4:
-            tps = completion_tokens / decode_window
-        elif latency > 0:
-            tps = completion_tokens / latency
+    # tokens/sec = generation speed over the decode window (first token ->
+    # last token). Time before the first token (model load, prompt processing)
+    # is TTFT and is reported separately. A 1-3 token answer has no measurable
+    # decode window, so it gets no speed at all rather than a misleading one.
+    decode_s = (end - (t0 + ttft)) if ttft is not None else None
+    tps = storage.decode_tps(completion_tokens, decode_s)
 
     # How much of the completion budget went to thinking. Exact when the API
     # reports it or when thinking came over the side channel; for inline tags we
@@ -287,6 +281,7 @@ def chat_completion(provider, model, messages, params, should_cancel=None, on_to
         "prompt_tokens": prompt_tokens,
         "total_tokens": total_tokens,
         "tokens_per_second": round(tps, 1) if tps is not None else None,
+        "decode_s": round(decode_s, 3) if decode_s is not None else None,
         "cost_usd": cost,
         "finish_reason": finish_reason,
         "cancelled": cancelled,
@@ -522,6 +517,59 @@ def build_messages(bench, case):
     return messages
 
 
+DEFAULT_REASONING_BUDGET = 4096
+_REASONING_MODELS = None          # set of (provider, model) seen thinking
+_REASONING_LOCK = threading.Lock()
+
+
+def effective_params(bench, params):
+    """Generation params for one benchmark: config defaults < benchmark
+    defaults < what the user set for this run. A blank/None value from the UI
+    means "use the default", not zero.
+
+    max_tokens is the *answer* budget each benchmark is designed around.
+    reasoning_budget is extra room granted on top of it to models that think
+    before answering (their thinking counts against max_tokens), so they are
+    not graded on an answer cut off mid-thought."""
+    merged = {"max_tokens": 1024,
+              "reasoning_budget": CONFIG.get("reasoning_budget", DEFAULT_REASONING_BUDGET)}
+    for layer in (CONFIG.get("default_params", {}), bench.get("default_params", {}),
+                  params or {}):
+        merged.update({k: v for k, v in layer.items() if v is not None and v != ""})
+    merged["max_tokens"] = max(1, int(merged["max_tokens"]))
+    merged["reasoning_budget"] = max(0, int(merged["reasoning_budget"]))
+    return merged
+
+
+def _load_reasoning_models():
+    """Models that produced reasoning in any saved run - so the thinking
+    allowance applies from the very first case, not after a retry."""
+    found = set()
+    try:
+        records = storage.scan(RESULTS_DIR)[0]
+    except Exception:  # noqa: BLE001 - a lookup must never fail a run
+        records = []
+    for r in records:
+        if any(c.get("reasoning") or (c.get("reasoning_tokens") or 0) > 0
+               for c in r["cases"]):
+            found.add((r["provider"], r["model"]))
+    return found
+
+
+def model_reasons(provider, model):
+    global _REASONING_MODELS
+    with _REASONING_LOCK:
+        if _REASONING_MODELS is None:
+            _REASONING_MODELS = _load_reasoning_models()
+        return (provider, model) in _REASONING_MODELS
+
+
+def remember_reasoning_model(provider, model):
+    model_reasons(provider, model)  # ensure loaded
+    with _REASONING_LOCK:
+        _REASONING_MODELS.add((provider, model))
+
+
 def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=None,
                          on_progress=None):
     """emit(dict) pushes one NDJSON event to the client. `on_progress(summary,
@@ -531,9 +579,9 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
     total = len(cases)
     case_results = []
     cancelled = False
-    merged = dict(CONFIG.get("default_params", {}))
-    merged.update(bench.get("default_params", {}))
-    merged.update(params or {})
+    merged = effective_params(bench, params)
+    answer_budget = merged["max_tokens"]
+    thinking_budget = merged["reasoning_budget"]
     # Everything needed to interpret (or re-score) this result later, even if
     # the benchmark file has since been edited or removed.
     header = {
@@ -585,8 +633,27 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
 
         try:
             messages = build_messages(bench, case)
-            res = chat_completion(provider, model, messages, merged,
+            thinks = model_reasons(provider, model)
+            budget = answer_budget + (thinking_budget if thinks else 0)
+            res = chat_completion(provider, model, messages,
+                                  dict(merged, max_tokens=budget),
                                   should_cancel=should_cancel, on_token=on_token)
+            retried = False
+            if res.get("reasoning"):
+                remember_reasoning_model(provider, model)
+                if (not thinks and thinking_budget > 0 and not res.get("cancelled")
+                        and res.get("finish_reason") == "length"):
+                    # First sign that this model thinks, and it ran out of room:
+                    # it was judged on the answer-only budget. Re-ask once with
+                    # the thinking allowance so the case is graded fairly.
+                    budget = answer_budget + thinking_budget
+                    emit({"type": "case_retry", "benchmark_id": bench["id"], "index": i,
+                          "reason": "reasoning model hit the answer budget",
+                          "max_tokens": budget})
+                    res = chat_completion(provider, model, messages,
+                                          dict(merged, max_tokens=budget),
+                                          should_cancel=should_cancel, on_token=on_token)
+                    retried = True
             if res.get("cancelled"):
                 cancelled = True
                 break
@@ -615,9 +682,13 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
                 "prompt_tokens": res.get("prompt_tokens"),
                 "total_tokens": res.get("total_tokens"),
                 "tokens_per_second": res.get("tokens_per_second"),
+                "decode_s": res.get("decode_s"),
                 "cost_usd": res.get("cost_usd"),
                 "finish_reason": res.get("finish_reason"),
+                "max_tokens": budget,
             })
+            if retried:
+                cr["retried_with_thinking_budget"] = True
             # keep the untouched model text when inline <think> tags were
             # stripped, so the split can be redone if the parser improves
             raw = res.get("content") or ""
@@ -966,6 +1037,7 @@ class Handler(BaseHTTPRequestHandler):
                 "lmstudio_base_url": CONFIG.get("lmstudio_base_url", ""),
                 "openrouter_configured": bool(CONFIG.get("openrouter_api_key")),
                 "default_params": CONFIG.get("default_params", {}),
+                "reasoning_budget": CONFIG.get("reasoning_budget", DEFAULT_REASONING_BUDGET),
             })
             return
         if path == "/api/models":
@@ -1083,6 +1155,8 @@ class Handler(BaseHTTPRequestHandler):
                 save_local_settings(updates)
             CONFIG = load_config()
             RESULTS_DIR = resolve_results_dir()
+            global _REASONING_MODELS
+            _REASONING_MODELS = None
             self._send_json({
                 "ok": True,
                 "lmstudio_base_url": CONFIG.get("lmstudio_base_url", ""),

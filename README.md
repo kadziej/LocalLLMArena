@@ -45,8 +45,10 @@ running token total, average speed, and (for OpenRouter) running cost.
 Detailed metrics are captured per case and aggregated per benchmark and per run:
 
 - **Tokens** — prompt, completion, and total token counts (from the model's usage report)
-- **Speed** — tokens/second (measured over the decode window, with a fall-back
-  for very short outputs)
+- **Speed** — generation speed in tokens/second, measured from the first token
+  to the last. Model loading and prompt processing are excluded (they show up
+  in TTFT). Answers of only a few tokens are too short to time and show "—";
+  benchmark/model speeds are token-weighted over the measurable answers.
 - **Time to first token (TTFT)** and **total latency** per question
 - **Cost (USD)** for OpenRouter runs (exact, reported by OpenRouter); local runs are free
 - **Total wall-clock time** and **average speed** for the whole run
@@ -82,9 +84,18 @@ answer. The app separates the two, and **only the answer is ever scored**:
   (`total_reasoning_tokens`) — that is what a thinking model actually costs you.
   The count is exact when it comes from the API or the stream side-channel, and
   marked *(est.)* when apportioned from inline tags.
-- **Truncated thoughts are diagnosed.** If `max_tokens` runs out mid-thought
-  there is no answer to grade, and the case says exactly that instead of a
-  confusing "no number found".
+- **Thinking gets its own budget.** A benchmark's `max_tokens` is the budget
+  for the *answer*; a thinking model's reasoning also counts against it, so a
+  1024-token budget can be spent before it answers. Models known to think get
+  an extra **Thinking budget** (default 4096, Run tab or `"reasoning_budget"`
+  in settings) on top. A model counts as "known" once any saved run shows it
+  reasoning; the first time an unknown model is caught thinking and runs out
+  of room, that case is retried once with the allowance (marked *retried* in
+  the case details). Leave **Max tokens** blank to use each benchmark's own
+  answer budget.
+- **Truncated thoughts are diagnosed.** If the budget still runs out
+  mid-thought there is no answer to grade, and the case says exactly that
+  instead of a confusing "no number found".
 
 Each case stores its `reasoning` alongside its `output`; open a question row and
 expand **🧠 Show reasoning** to read what the model was thinking.
@@ -287,7 +298,9 @@ Results are the valuable part of this app, so storage follows a few hard rules
 By default runs live in `results/` inside the checkout (gitignored - so
 `git clean -x` or a fresh clone would not have them). To keep them somewhere
 safer, set `"results_dir"` in `settings.local.json` (or the `ARENA_RESULTS_DIR`
-env var) to e.g. `~/Documents/LocalLLMArena-results` and move the files there.
+env var) to e.g. `~/LocalLLMArena-results` and move the files there. On macOS
+avoid `~/Documents`, `~/Desktop` and `~/Downloads`: privacy protection can stop
+the server process from listing them (the Leaderboard tab then shows a warning).
 
 **When you change the record format:** bump `SCHEMA_VERSION` in `storage.py`,
 teach `upgrade_record` the old shape, and add a sample file of the *old* shape
