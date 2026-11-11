@@ -325,3 +325,4 @@ details.reasoning pre { color: var(--muted); font-style: italic; }
 .lb-cell.lb-flagged { opacity: 0.8; }
 .lb-unreadable { color: var(--amber); font-size: 12px; margin-top: 8px; }
 .lb-hint a { color: var(--accent); }
+.lb-spread { font-size: 9px; font-weight: 500; margin-left: 2px; color: var(--muted, #8b949e); }

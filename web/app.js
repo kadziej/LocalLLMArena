@@ -349,6 +349,8 @@ async function runAll() {
   // blank = let each benchmark use its own answer budget
   const maxTok = parseInt($("#param-maxtok").value, 10);
   if (Number.isFinite(maxTok) && maxTok > 0) params.max_tokens = maxTok;
+  const reps = parseInt($("#param-repeats").value, 10);
+  if (Number.isFinite(reps) && reps > 1) params.repeats = Math.min(20, reps);
   const think = parseInt($("#param-thinkbudget").value, 10);
   if (Number.isFinite(think) && think >= 0) params.reasoning_budget = think;
 
@@ -420,13 +422,14 @@ function dispatch(ev) {
       session.runId = ev.run_id;
       session.numTargets = ev.num_targets || 1;
       $("#queue-status").textContent = session.numTargets > 1
-        ? `Queue: ${session.numTargets} models` : "running…";
+        ? `Queue: ${session.numTargets} runs` : "running…";
       return;
     case "target_start": {
       const seq = ++runSeq;
       const section = document.createElement("div");
       section.className = "model-section";
-      const queueTag = ev.total > 1 ? `<span class="ms-count">model ${ev.index + 1}/${ev.total}</span>` : "";
+      const queueTag = (ev.total > 1 ? `<span class="ms-count">run ${ev.index + 1}/${ev.total}</span>` : "")
+        + (ev.repeats > 1 ? `<span class="ms-count">repeat ${ev.repeat}/${ev.repeats}</span>` : "");
       section.innerHTML = `<div class="model-banner">
           <span class="ms-prov">${providerIcon(ev.provider)}</span>
           <span class="ms-model">${escapeHtml(ev.model)}</span>${queueTag}
@@ -435,7 +438,7 @@ function dispatch(ev) {
       $("#live-results").appendChild(section);
       const agg = newAgg(ev.provider, ev.total_cases);
       session.curCtx = { seq, container: $("#msbody-" + seq), blocks: {}, agg, model: ev.model, idx: ev.index, total: ev.total };
-      if (ev.total > 1) $("#queue-status").innerHTML = `Running model <b>${ev.index + 1}/${ev.total}</b>: ${escapeHtml(ev.model)}`;
+      if (ev.total > 1) $("#queue-status").innerHTML = `Running <b>${ev.index + 1}/${ev.total}</b>: ${escapeHtml(ev.model)}`;
       $("#progress-bar").style.width = "0%";
       $("#live-stats").classList.remove("hidden");
       renderLiveStats(agg);
@@ -443,7 +446,7 @@ function dispatch(ev) {
     }
     case "queue_done":
       if (ev.cancelled) $("#queue-status").innerHTML = `<span class="warn">■ Queue stopped</span>`;
-      else if ((session.numTargets || 1) > 1) $("#queue-status").innerHTML = `✓ Queue complete — ${session.numTargets} models. See the <b>Leaderboard</b> to compare.`;
+      else if ((session.numTargets || 1) > 1) $("#queue-status").innerHTML = `✓ Queue complete — ${session.numTargets} runs. See the <b>Leaderboard</b> to compare.`;
       else $("#queue-status").innerHTML = `✓ Done — saved. See the <b>Leaderboard</b>.`;
       return;
     case "error":
@@ -647,7 +650,8 @@ function showCaseModal(r) {
     <div class="kv"><div class="k">Expected</div><pre>${escapeHtml(exp)}</pre></div>
     ${reasoningBlock(r)}
     <div class="kv"><div class="k">Answer (this is what was scored)</div><pre>${escapeHtml(r.output)}</pre></div>
-    <div class="kv"><div class="k">Scoring detail</div><pre>${escapeHtml(r.detail)}</pre></div>`;
+    <div class="kv"><div class="k">Scoring detail</div><pre>${escapeHtml(r.detail)}</pre></div>
+    ${r.rescored ? `<div class="kv"><div class="k">Re-scored</div><pre>Originally ${r.passed_recorded ? "passed" : "failed"}: ${escapeHtml(r.detail_recorded || "")}</pre></div>` : ""}`;
   $("#modal").classList.remove("hidden");
 }
 $("#modal-close").addEventListener("click", () => $("#modal").classList.add("hidden"));
@@ -724,7 +728,12 @@ function renderLeaderboard() {
     (lbData.columns || []).forEach((c) => {
       const e = r.benches[c.id];
       if (!e) { tds += `<td class="lb-cell empty-cell">·</td>`; return; }
-      const notes = [`${e.passed}/${e.answered}`];
+      const notes = e.runs > 1
+        ? [`mean of ${e.runs} repeats · ±${e.std} (std) · range ${e.min}–${e.max}%`,
+           e.flaky.length ? `${e.flaky.length} flaky question(s): ${e.flaky.join(", ")}` : "no flaky questions"]
+        : [`${e.passed}/${e.answered}`];
+      if (e.ci95 != null) notes.push(`luck of the question sample: up to ±${e.ci95} pts (95% CI, ${e.total} questions)`);
+      if (e.rescored) notes.push("re-scored");
       let mark = "";
       if (e.partial) {
         mark += "◔";
@@ -732,7 +741,7 @@ function renderLeaderboard() {
       }
       if (e.stale) { mark += "*"; notes.push("benchmark was edited after this run — not comparable with newer runs"); }
       if (e.removed) notes.push("benchmark file no longer exists");
-      tds += `<td class="lb-cell ${scoreClass(e.score)} ${e.stale || e.partial ? "lb-flagged" : ""}" data-rid="${e.result_id}" title="${escapeHtml(notes.join(" · "))}">${e.score}%${mark ? `<sup class="lb-mark">${mark}</sup>` : ""}</td>`;
+      tds += `<td class="lb-cell ${scoreClass(e.score)} ${e.stale || e.partial ? "lb-flagged" : ""}" data-rid="${e.result_id}" title="${escapeHtml(notes.join(" · "))}">${e.score}%${e.runs > 1 ? `<span class="lb-spread">±${e.std}</span>` : ""}${mark ? `<sup class="lb-mark">${mark}</sup>` : ""}</td>`;
     });
     tds += `<td>${r.avg_tokens_per_second != null ? r.avg_tokens_per_second : "—"}</td>`;
     tds += `<td>${r.total_cost_usd != null ? fmtCost(r.total_cost_usd) : (r.provider === "openrouter" ? "—" : "free")}</td>`;
@@ -744,7 +753,7 @@ function renderLeaderboard() {
   host.innerHTML = `<div class="lb-scroll"><table class="leaderboard consolidated">
     <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
     <div class="muted lb-hint">Click a column header to sort · click a benchmark cell to open that run's details
-      · <sup>*</sup> benchmark edited since the run · <sup>◔</sup> incomplete run</div>${storageFooter()}`;
+      · <sup>*</sup> benchmark edited since the run · <sup>◔</sup> incomplete run · ±N = spread over repeats · hover a cell for details</div>${storageFooter()}`;
 
   host.querySelectorAll("th[data-key]").forEach((th) => th.addEventListener("click", () => {
     const key = th.dataset.key;
@@ -756,6 +765,36 @@ function renderLeaderboard() {
     td.addEventListener("click", () => showRunDetail(td.dataset.rid)));
 }
 $("#refresh-history").addEventListener("click", loadHistory);
+
+async function rescoreRuns() {
+  const btn = $("#rescore-btn");
+  btn.disabled = true;
+  try {
+    const post = (apply) => fetch("/api/rescore", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apply }),
+    }).then((r) => r.json());
+    const rep = await post(false);
+    const lines = rep.changes.slice(0, 25).map((c) =>
+      `${c.after ? "fail → PASS" : "pass → FAIL"}  ${c.model} · ${c.benchmark_id}/${c.case_id}`);
+    if (rep.changes.length > 25) lines.push(`…and ${rep.changes.length - 25} more`);
+    if (rep.refreshed_benchmarks) lines.push(`${rep.refreshed_benchmarks} result(s) now match the current benchmark files`);
+    if (!lines.length) {
+      alert(`Re-graded ${rep.cases_graded} saved answers in ${rep.runs_checked} runs — nothing changes.`);
+      return;
+    }
+    if (!confirm(`Re-grading ${rep.cases_graded} saved answers would change:\n\n${lines.join("\n")}\n\n`
+      + "Apply? Run files are not modified; new verdicts are stored alongside them and can be undone by deleting the rescores folder.")) return;
+    const done = await post(true);
+    alert(`Applied to ${done.runs_changed} run(s).`);
+    loadHistory();
+  } catch (e) {
+    alert("Re-score failed: " + e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+$("#rescore-btn").addEventListener("click", rescoreRuns);
 
 function storageFooter() {
   const st = lbData.storage;

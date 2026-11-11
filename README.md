@@ -239,6 +239,7 @@ server.py            Pure-stdlib HTTP server. Serves the web UI and a small JSON
 benchmarks/*.json    One file per benchmark (see format above).
 storage.py           Durable run storage: atomic writes, schema versioning,
                      tolerant reads, benchmark fingerprints, backup export.
+rescore.py           Re-grade saved runs into overlay files (CLI + /api/rescore).
 results/*.json       One file per run, powering the Leaderboard tab.
 web/                 index.html + app.js + styles.css — no framework, no build.
 tests/               stdlib unittest suite (scoring, reasoning split, storage
@@ -268,6 +269,8 @@ API endpoints (handy if you want to script runs):
 - `POST /api/run/stop` — `{ "run_id" }` cancels an in-flight run/queue
 - `GET  /api/leaderboard` — runs consolidated into one row per model, with a per-benchmark column matrix
 - `GET  /api/results` / `GET /api/results/{id}` — saved runs
+- `POST /api/rescore` — `{"apply": false}` previews a re-grade of every saved run, `true` writes the overlays
+- `GET  /api/export` — zip of every run file and overlay
 
 ---
 
@@ -293,7 +296,7 @@ Results are the valuable part of this app, so storage follows a few hard rules
 - **Nothing vanishes silently.** A run file that can't be parsed is listed with
   a warning on the Leaderboard tab and left untouched on disk.
 - **Backups.** *Leaderboard → Download backup (.zip)* (or `GET /api/export`)
-  bundles every run file.
+  bundles every run file and re-score overlay.
 
 By default runs live in `results/` inside the checkout (gitignored - so
 `git clean -x` or a fresh clone would not have them). To keep them somewhere
@@ -306,6 +309,57 @@ the server process from listing them (the Leaderboard tab then shows a warning).
 teach `upgrade_record` the old shape, and add a sample file of the *old* shape
 to `tests/fixtures/` (never edit existing fixtures) - the suite loads every
 fixture through the full read path.
+
+## Re-scoring saved runs
+
+Fixed a scorer bug, or corrected a wrong expected answer in a benchmark file?
+Re-grade every saved answer without calling a model:
+
+- **Leaderboard → ⟲ Re-score saved runs** shows what would change and asks
+  before applying, or from a terminal:
+
+```bash
+python3 rescore.py
+```
+
+```bash
+python3 rescore.py --apply
+```
+
+How each stored answer is graded:
+
+- If the question's prompt (and system prompt) is unchanged in the current
+  benchmark file, it is graded against the **current** expected answer and
+  scoring type. A fixed answer key repairs old runs, and their `*` (edited
+  benchmark) flag clears once the run covers exactly the current questions.
+- If the prompt changed, it is graded against the expected answer **stored in
+  the run**, so only scorer-code fixes apply. It is never graded against an
+  answer key written for a different question.
+- Inline `<think>` tags are split again from the raw model text.
+
+Run files are never modified. Verdicts go to `rescores/<run id>.json` next to
+the runs and are applied when read; a case's details show its original
+verdict. Delete the `rescores/` folder to get the original scores back.
+
+## Repeat runs and score spread
+
+A single run of a 12-question benchmark is noisy: one question is 8 points,
+and the leaderboard tooltip shows the 95% confidence interval that implies.
+Set **Repeats** on the Run tab to run each model N times in a row. Every
+repeat is saved as its own run; the leaderboard pools the group into one cell:
+
+- the mean score, with **±std** next to it
+- in the tooltip: the min–max range and the **flaky questions** (passed in
+  some repeats, failed in others)
+
+Repeats only pool with their own group: separate runs launched at different
+times are never averaged (the newest complete run still wins), because
+something may have changed in between. A repeat that hit request errors is
+left out of the pool.
+
+At temperature 0 most local models give the same answer every time, so
+repeats mostly confirm that. To measure how stable a model really is, use a
+temperature around 0.6–1.0.
 
 ## Tests
 

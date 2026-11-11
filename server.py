@@ -10,6 +10,7 @@ Only the Python standard library is used, so there is nothing to pip install.
 """
 
 import json
+import math
 import os
 import re
 import threading
@@ -747,13 +748,28 @@ def list_results():
     return {"results": out, "unreadable": unreadable}
 
 
+def _wilson(p, n, z=1.96):
+    """Half-width of the 95% Wilson interval for a pass rate p over n
+    questions - how much a score could move by luck of the question sample."""
+    if not n:
+        return None
+    denom = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return round(100 * max(centre + half - p, p - (centre - half)), 1)
+
+
 def build_leaderboard():
     """Consolidate every saved run into one row per (provider, model), with a
-    cell per benchmark. For each cell the newest *clean* run wins (finished,
-    every case answered, no request errors); a stopped/interrupted/errored run
-    only fills a cell that has nothing better, so a failed re-run never hides
-    a good earlier result. Cells whose benchmark has changed since the run are
-    flagged `stale`."""
+    cell per benchmark.
+
+    For each cell the newest *clean* run wins (finished, every case answered,
+    no request errors); a stopped/interrupted/errored run only fills a cell
+    that has nothing better, so a failed re-run never hides a good earlier
+    result. When the winning run was one of N repeats launched together, the
+    cell pools all clean repeats in that group: mean score, spread (std, min,
+    max) and flaky questions (passed in some repeats, failed in others).
+    Cells whose benchmark has changed since the run are flagged `stale`."""
     current = [b for b in all_benchmarks() if not b.get("error")]
     bench_order = {b["id"]: i for i, b in enumerate(current)}
     bench_name = {b["id"]: b["name"] for b in current}
@@ -767,7 +783,7 @@ def build_leaderboard():
         if r["status"] == "running":
             continue  # still in flight; it lands here once it has finished
         prov, model, ts, rid = r["provider"], r["model"], r["timestamp"], r["id"]
-        m = models.setdefault((prov, model), {"provider": prov, "model": model, "benches": {},
+        m = models.setdefault((prov, model), {"provider": prov, "model": model, "entries": {},
                                               "last_run": ts, "run_ids": set()})
         m["run_ids"].add(rid)
         if ts > m["last_run"]:
@@ -780,45 +796,75 @@ def build_leaderboard():
             clean = (not b.get("cancelled") and b["answered"] >= b["total"]
                      and not b["errors"])
             h = b["benchmark_hash"]
-            entry = {
+            m["entries"].setdefault(bid, []).append({
                 "score": b["score"], "passed": b["passed"], "answered": b["answered"],
                 "total": b["total"], "errors": b["errors"],
                 "avg_tokens_per_second": b.get("avg_tokens_per_second"),
                 "total_cost_usd": b.get("total_cost_usd"),
                 "total_time_s": b.get("total_time_s"),
                 "total_tokens": b.get("total_tokens"),
-                "timestamp": ts, "result_id": rid,
-                "partial": not clean,
+                "timestamp": ts, "result_id": rid, "clean": clean,
+                "group": r.get("repeat_group") or rid,
+                "rescored": bool(r.get("rescored_at")),
+                "case_results": {c["id"]: bool(c.get("passed")) for c in r["cases"]
+                                 if c["benchmark_id"] == bid and not c.get("error")},
                 # stale: graded against a different version of the benchmark
                 # than the one on disk now (None = unknown, pre-v2 record)
                 "stale": (h != bench_hash[bid]) if (h and bid in bench_hash) else None,
                 "removed": bid not in bench_hash,
-            }
-            prev = m["benches"].get(bid)
-            if prev is None or (clean, ts) >= (not prev["partial"], prev["timestamp"]):
-                m["benches"][bid] = entry
+            })
 
     col_ids = sorted(seen.keys(), key=lambda b: (bench_order.get(b, 999), seen[b]))
     columns = [{"id": b, "name": bench_name.get(b, seen[b]),
                 "removed": b not in bench_hash} for b in col_ids]
 
+    def cell(entries):
+        head = max(entries, key=lambda e: (e["clean"], e["timestamp"]))
+        pool = ([e for e in entries if e["clean"] and e["group"] == head["group"]]
+                if head["clean"] else [head])
+        n = len(pool)
+        scores = [e["score"] for e in pool]
+        mean = round(sum(scores) / n, 1)
+        std = (round(math.sqrt(sum((s - mean) ** 2 for s in scores) / (n - 1)), 1)
+               if n > 1 else None)
+        outcomes = {}
+        for e in pool:
+            for cid, ok in e["case_results"].items():
+                outcomes.setdefault(cid, set()).add(ok)
+        flaky = sorted(cid for cid, oks in outcomes.items() if len(oks) > 1)
+        tps = [e["avg_tokens_per_second"] for e in pool if e["avg_tokens_per_second"] is not None]
+        return {
+            "score": mean, "runs": n, "std": std,
+            "min": min(scores), "max": max(scores),
+            "flaky": flaky,
+            "ci95": _wilson(mean / 100.0, head["total"]),
+            "passed": head["passed"], "answered": head["answered"], "total": head["total"],
+            "errors": head["errors"],
+            "avg_tokens_per_second": round(sum(tps) / len(tps), 1) if tps else None,
+            "total_cost_usd": head["total_cost_usd"], "total_time_s": head["total_time_s"],
+            "total_tokens": head["total_tokens"],
+            "result_id": head["result_id"], "result_ids": [e["result_id"] for e in pool],
+            "partial": not head["clean"], "stale": head["stale"], "removed": head["removed"],
+            "rescored": head["rescored"],
+        }
+
     rows = []
     for m in models.values():
-        benches = m["benches"]
-        passed = sum((e["passed"] or 0) for e in benches.values())
-        answered = sum((e["answered"] or 0) for e in benches.values())
+        benches = {bid: cell(es) for bid, es in m["entries"].items()}
+        # overall: question-weighted mean of the cells (repeats don't add weight)
+        weight = sum(e["total"] or 0 for e in benches.values())
+        overall = (round(sum(e["score"] * (e["total"] or 0) for e in benches.values()) / weight, 1)
+                   if weight else 0.0)
         tps = [e["avg_tokens_per_second"] for e in benches.values() if e["avg_tokens_per_second"] is not None]
         costs = [e["total_cost_usd"] for e in benches.values() if e["total_cost_usd"] is not None]
         times = [e["total_time_s"] for e in benches.values() if e["total_time_s"] is not None]
         toks = [e["total_tokens"] for e in benches.values() if e["total_tokens"] is not None]
         rows.append({
             "provider": m["provider"], "model": m["model"],
-            "overall_score": round(100.0 * passed / answered, 1) if answered else 0.0,
-            "passed": passed, "answered": answered,
-            "benches": {bid: {k: e[k] for k in (
-                "score", "passed", "answered", "total", "errors", "avg_tokens_per_second",
-                "total_cost_usd", "result_id", "partial", "stale", "removed")}
-                for bid, e in benches.items()},
+            "overall_score": overall,
+            "passed": sum(e["passed"] or 0 for e in benches.values()),
+            "answered": sum(e["answered"] or 0 for e in benches.values()),
+            "benches": benches,
             "avg_tokens_per_second": round(sum(tps) / len(tps), 1) if tps else None,
             "total_cost_usd": round(sum(costs), 6) if costs else None,
             "total_time_s": round(sum(times), 1) if times else None,
@@ -909,8 +955,13 @@ def run_worker(run):
                 break
             provider = target.get("provider", "local")
             model = target.get("model")
+            reps = int(target.get("repeats") or 1)
+            group = {"repeat_group": f"{run_id}-{target.get('group', idx)}",
+                     "repeat_index": int(target.get("repeat") or 1),
+                     "repeat_count": reps} if reps > 1 else {}
             run_emit(run, {"type": "target_start", "index": idx, "total": len(targets),
-                           "provider": provider, "model": model, "total_cases": total_cases})
+                           "provider": provider, "model": model, "total_cases": total_cases,
+                           "repeat": group.get("repeat_index"), "repeats": reps})
             summaries, all_cases, tcancel = [], [], False
             rid, started_at = storage.new_result_id(), storage.now_iso()
 
@@ -918,7 +969,8 @@ def run_worker(run):
                 extra = [partial_summary] if partial_summary else []
                 rec = storage.build_record(
                     rid, started_at, provider, model, params,
-                    summaries + extra, all_cases + list(partial_cases), status)
+                    summaries + extra, all_cases + list(partial_cases), status,
+                    extra=group)
                 storage.write_record(RESULTS_DIR, rec)
                 return rec
 
@@ -1124,11 +1176,17 @@ class Handler(BaseHTTPRequestHandler):
         self._send_static(path)
 
     def do_POST(self):
+        global CONFIG, RESULTS_DIR, _REASONING_MODELS
         parsed = urlparse(self.path)
         path = parsed.path
 
         if path == "/api/run":
             self._handle_run()
+            return
+        if path == "/api/rescore":
+            import rescore
+            body = self._read_body()
+            self._send_json(rescore.rescore_all(RESULTS_DIR, apply=bool(body.get("apply"))))
             return
         if path == "/api/run/stop":
             body = self._read_body()
@@ -1140,7 +1198,6 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": run is not None, "run_id": rid})
             return
         if path in ("/api/settings", "/api/reload-config"):
-            global CONFIG, RESULTS_DIR
             body = self._read_body()
             updates = {}
             if "lmstudio_base_url" in body:
@@ -1155,7 +1212,6 @@ class Handler(BaseHTTPRequestHandler):
                 save_local_settings(updates)
             CONFIG = load_config()
             RESULTS_DIR = resolve_results_dir()
-            global _REASONING_MODELS
             _REASONING_MODELS = None
             self._send_json({
                 "ok": True,
@@ -1176,7 +1232,15 @@ class Handler(BaseHTTPRequestHandler):
                 targets = [{"provider": body.get("provider", "local"), "model": model}]
         targets = [t for t in (targets or []) if t.get("model")]
         bench_ids = body.get("benchmark_ids", [])
-        params = body.get("params", {})
+        params = dict(body.get("params") or {})
+        try:
+            repeats = max(1, min(20, int(params.pop("repeats", None) or body.get("repeats") or 1)))
+        except (TypeError, ValueError):
+            repeats = 1
+        if repeats > 1:
+            # each repeat is its own saved run; the leaderboard pools the group
+            targets = [dict(t, group=g, repeat=k + 1, repeats=repeats)
+                       for g, t in enumerate(targets) for k in range(repeats)]
         if not targets or not bench_ids:
             self._send_json({"error": "targets (or model) and benchmark_ids are required"}, 400)
             return

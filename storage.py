@@ -16,6 +16,10 @@ the app and the benchmark sets keep changing:
      that cannot be parsed are reported, never silently dropped.
   5. Runs are checkpointed after every case, so killing the server mid-run
      keeps everything completed so far (shown as "interrupted").
+  6. Re-scoring never edits a run. New verdicts go to an overlay file in
+     RESULTS_DIR/rescores/<id>.json that is applied on read; the original
+     verdict stays in the run file (and is shown as `passed_recorded`).
+     Deleting the overlay restores the original scores exactly.
 
 When the record shape changes: bump SCHEMA_VERSION, teach `upgrade_record` the
 old shape, and add a fixture of the old shape under tests/fixtures/ - the test
@@ -199,7 +203,8 @@ def summarize_cases(cases):
     }
 
 
-def build_record(rid, started_at, provider, model, params, summaries, cases, status):
+def build_record(rid, started_at, provider, model, params, summaries, cases, status,
+                 extra=None):
     total = sum(s.get("total") or 0 for s in summaries)
     answered = sum(s.get("answered", s.get("total") or 0) for s in summaries)
     passed = sum(s.get("passed") or 0 for s in summaries)
@@ -229,6 +234,7 @@ def build_record(rid, started_at, provider, model, params, summaries, cases, sta
         "total_time_s": round(sum(s.get("total_time_s") or 0 for s in summaries), 3),
         "avg_tokens_per_second": speed_of(cases),
         "total_cost_usd": round(sum(costs), 6) if costs else None,
+        **(extra or {}),
         "benchmarks": summaries,
         "cases": cases,
     }
@@ -299,15 +305,78 @@ def upgrade_record(r, fallback_id=None):
     return r
 
 
-def load_record(results_dir, rid):
+# --------------------------------------------------------------------------- #
+#  Re-score overlays
+# --------------------------------------------------------------------------- #
+OVERLAY_SUBDIR = "rescores"
+
+
+def overlay_path(results_dir, rid):
+    p = result_path(results_dir, rid)
+    return p and os.path.join(results_dir, OVERLAY_SUBDIR, rid + ".json")
+
+
+def load_overlay(results_dir, rid):
+    p = overlay_path(results_dir, rid)
+    if not p or not os.path.isfile(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None   # a broken overlay just means "show the original scores"
+
+
+def write_overlay(results_dir, overlay):
+    atomic_write_json(overlay_path(results_dir, overlay["run_id"]), overlay)
+
+
+def apply_overlay(r, ov):
+    """Apply re-scored verdicts to an upgraded record (in memory) and
+    recompute the pass counts and scores that depend on them."""
+    if not ov or not isinstance(ov.get("cases"), list):
+        return r
+    cases = r["cases"]
+    for e in ov["cases"]:
+        i = e.get("i")
+        if not isinstance(i, int) or not 0 <= i < len(cases):
+            continue
+        c = cases[i]
+        if c.get("id") != e.get("id"):
+            continue          # overlay does not match this record; ignore it
+        c["passed_recorded"] = c.get("passed")
+        c["detail_recorded"] = c.get("detail")
+        for k in ("passed", "detail", "expected", "scoring"):
+            if k in e:
+                c[k] = e[k]
+        c["rescored"] = True
+    for b in r["benchmarks"]:
+        bc = [c for c in cases if c["benchmark_id"] == b["benchmark_id"]]
+        if bc:
+            b["passed_recorded"] = b["passed"]
+            b["passed"] = sum(1 for c in bc if c.get("passed"))
+            b["score"] = round(100.0 * b["passed"] / b["answered"], 1) if b["answered"] else 0.0
+        new_hash = (ov.get("benchmark_hashes") or {}).get(b["benchmark_id"])
+        if new_hash:
+            b["benchmark_hash_recorded"] = b["benchmark_hash"]
+            b["benchmark_hash"] = new_hash
+    r["passed_recorded"] = r["passed"]
+    r["passed"] = sum(b["passed"] for b in r["benchmarks"])
+    r["overall_score"] = round(100.0 * r["passed"] / r["answered"], 1) if r["answered"] else 0.0
+    r["rescored_at"] = ov.get("rescored_at")
+    return r
+
+
+def load_record(results_dir, rid, overlay=True):
     path = result_path(results_dir, rid)
     if path is None or not os.path.isfile(path):
         return None
     with open(path, "r", encoding="utf-8") as f:
-        return upgrade_record(json.load(f), fallback_id=rid)
+        r = upgrade_record(json.load(f), fallback_id=rid)
+    return apply_overlay(r, load_overlay(results_dir, rid)) if overlay else r
 
 
-def scan(results_dir):
+def scan(results_dir, overlay=True):
     """Read every run. Returns (records sorted oldest first, unreadable) where
     unreadable is a list of {"file", "error"} - surfaced in the UI so a damaged
     file is noticed instead of quietly vanishing from the leaderboard."""
@@ -325,7 +394,10 @@ def scan(results_dir):
             continue
         try:
             with open(os.path.join(results_dir, fn), "r", encoding="utf-8") as f:
-                records.append(upgrade_record(json.load(f), fallback_id=fn[:-5]))
+                r = upgrade_record(json.load(f), fallback_id=fn[:-5])
+            if overlay:
+                r = apply_overlay(r, load_overlay(results_dir, r["id"]))
+            records.append(r)
         except Exception as e:  # noqa: BLE001
             unreadable.append({"file": fn, "error": f"{type(e).__name__}: {e}"})
     records.sort(key=lambda r: (r.get("timestamp") or "", r.get("id") or ""))
@@ -340,4 +412,9 @@ def export_zip(results_dir):
             for fn in sorted(os.listdir(results_dir)):
                 if fn.endswith(".json") and not fn.startswith("."):
                     z.write(os.path.join(results_dir, fn), arcname=fn)
+            od = os.path.join(results_dir, OVERLAY_SUBDIR)
+            if os.path.isdir(od):
+                for fn in sorted(os.listdir(od)):
+                    if fn.endswith(".json") and not fn.startswith("."):
+                        z.write(os.path.join(od, fn), arcname=OVERLAY_SUBDIR + "/" + fn)
     return buf.getvalue()
