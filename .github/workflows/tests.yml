@@ -7,15 +7,20 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # 3.9 = the oldest Python the app supports (macOS system python3)
-        python-version: ["3.9", "3.13"]
+        include:
+          # 3.9 = the oldest Python the app supports (macOS system python3);
+          # newer Ubuntu images no longer ship a 3.9 build
+          - python-version: "3.9"
+            os: ubuntu-24.04
+          - python-version: "3.13"
+            os: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Unit tests (stdlib only, no model server needed)
