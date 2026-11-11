@@ -363,6 +363,13 @@ temperature around 0.6–1.0.
 
 ## Tests
 
+[![tests](https://github.com/kadziej/LocalLLMArena/actions/workflows/tests.yml/badge.svg)](https://github.com/kadziej/LocalLLMArena/actions/workflows/tests.yml)
+
+GitHub Actions runs the suite on every push and pull request
+(`.github/workflows/tests.yml`), on Python 3.9 and 3.13. It also checks that
+every benchmark file loads and that `web/app.js` parses. No model server is
+needed: model calls are faked in the tests.
+
 Still zero-dependency — the suite is plain `unittest` from the standard library:
 
 ```bash

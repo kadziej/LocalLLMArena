@@ -9,6 +9,7 @@ Then open the URL it prints (default http://localhost:8080).
 Only the Python standard library is used, so there is nothing to pip install.
 """
 
+import bisect
 import json
 import math
 import os
@@ -907,7 +908,9 @@ def new_run(targets, benchmark_ids, params):
     run = {
         "id": run_id,
         "cancel": False,
-        "events": [],
+        "events": [],        # buffered events, oldest first
+        "seqs": [],          # parallel list: each event's sequence number
+        "next_seq": 0,
         "done": False,
         "lock": lock,
         "cond": threading.Condition(lock),
@@ -924,10 +927,43 @@ def new_run(targets, benchmark_ids, params):
     return run
 
 
+# Token events are only useful while their question is being answered: once
+# the question's result arrives (or it is retried) they are dropped, so a long
+# queue buffers one question's tokens instead of every token of every run.
+# Events keep their sequence numbers, so streams resume correctly across drops.
+_TOKEN_FLUSH_TYPES = ("case", "case_retry")
+
+
 def run_emit(run, ev):
     with run["cond"]:
+        if ev.get("type") in _TOKEN_FLUSH_TYPES and run["events"]:
+            keep = [k for k, e in enumerate(run["events"]) if e.get("type") != "token"]
+            if len(keep) != len(run["events"]):
+                run["events"] = [run["events"][k] for k in keep]
+                run["seqs"] = [run["seqs"][k] for k in keep]
         run["events"].append(ev)
+        run["seqs"].append(run["next_seq"])
+        run["next_seq"] += 1
         run["cond"].notify_all()
+
+
+def iter_run_events(run, since=0, wait=1.0):
+    """Yield batches of a run's buffered events with sequence number >= since,
+    following the run until it is done. A reader that falls behind simply
+    skips token events that were dropped meanwhile."""
+    nxt = since
+    while True:
+        with run["cond"]:
+            while run["next_seq"] <= nxt and not run["done"]:
+                run["cond"].wait(timeout=wait)
+            start = bisect.bisect_left(run["seqs"], nxt)
+            pending = run["events"][start:]
+            nxt = run["next_seq"]
+            done = run["done"]
+        if pending:
+            yield pending
+        if done:
+            return
 
 
 def run_worker(run):
@@ -1117,12 +1153,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/runs":
             # active (not yet finished) runs, so a refreshed page can re-attach
             with RUNS_LOCK:
+                _prune_runs_locked()
                 runs = [{
                     "run_id": r["id"], "done": r["done"],
                     "targets": [{"provider": t.get("provider", "local"), "model": t.get("model")}
                                 for t in r["targets"]],
                     "num_targets": len(r["targets"]),
-                    "events_count": len(r["events"]),
+                    "events_count": r["next_seq"],
                     "started": r["started"],
                 } for r in RUNS.values() if not r["done"]]
             runs.sort(key=lambda x: x["started"], reverse=True)
@@ -1248,27 +1285,18 @@ class Handler(BaseHTTPRequestHandler):
         self._stream_run(run, since=0)
 
     def _stream_run(self, run, since=0):
-        """Stream a run's buffered NDJSON events from index `since`, following
+        """Stream a run's buffered NDJSON events from sequence `since`, following
         until the run is done. Safe to call repeatedly (re-attach after refresh).
         If the client disconnects, the run keeps going in its worker thread."""
         self.send_response(200)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-        i = since
         try:
-            while True:
-                with run["cond"]:
-                    while i >= len(run["events"]) and not run["done"]:
-                        run["cond"].wait(timeout=1.0)
-                    pending = run["events"][i:]
-                    done = run["done"]
+            for pending in iter_run_events(run, since):
                 for ev in pending:
                     self.wfile.write((json.dumps(ev, ensure_ascii=False) + "\n").encode("utf-8"))
                 self.wfile.flush()
-                i += len(pending)
-                if done and i >= len(run["events"]):
-                    break
         except (BrokenPipeError, ConnectionResetError):
             return  # client navigated away; worker thread continues
 

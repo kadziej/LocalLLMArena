@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 = the oldest Python the app supports (macOS system python3)
+        python-version: ["3.9", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Unit tests (stdlib only, no model server needed)
+        run: python -m unittest discover -s tests -v
+      - name: Python files compile
+        run: python -m py_compile server.py storage.py rescore.py
+      - name: Benchmark files are valid
+        run: |
+          python - <<'PY'
+          import server
+          bad = [b for b in server.all_benchmarks() if b.get("error") or not b.get("cases")]
+          for b in bad:
+              print("BROKEN:", b.get("_file") or b["id"], b.get("error") or "no cases")
+          raise SystemExit(1 if bad else 0)
+          PY
+      - name: Frontend syntax
+        if: matrix.python-version == '3.13'
+        run: node --check web/app.js
