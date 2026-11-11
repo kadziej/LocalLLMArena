@@ -680,7 +680,7 @@ function lbColumns() {
 function renderLeaderboard() {
   const host = $("#history-list");
   if (!lbData || !lbData.rows.length) {
-    host.innerHTML = `<div class="empty">No runs yet. Run some benchmarks first.</div>`;
+    host.innerHTML = `<div class="empty">No runs yet. Run some benchmarks first.</div>${lbData ? storageFooter() : ""}`;
     return;
   }
   const cols = lbColumns();
@@ -712,7 +712,15 @@ function renderLeaderboard() {
     (lbData.columns || []).forEach((c) => {
       const e = r.benches[c.id];
       if (!e) { tds += `<td class="lb-cell empty-cell">·</td>`; return; }
-      tds += `<td class="lb-cell ${scoreClass(e.score)}" data-rid="${e.result_id}" title="${e.passed}/${e.answered}">${e.score}%</td>`;
+      const notes = [`${e.passed}/${e.answered}`];
+      let mark = "";
+      if (e.partial) {
+        mark += "◔";
+        notes.push(e.errors ? `${e.errors} request error(s)` : `incomplete run: ${e.answered} of ${e.total} cases`);
+      }
+      if (e.stale) { mark += "*"; notes.push("benchmark was edited after this run — not comparable with newer runs"); }
+      if (e.removed) notes.push("benchmark file no longer exists");
+      tds += `<td class="lb-cell ${scoreClass(e.score)} ${e.stale || e.partial ? "lb-flagged" : ""}" data-rid="${e.result_id}" title="${escapeHtml(notes.join(" · "))}">${e.score}%${mark ? `<sup class="lb-mark">${mark}</sup>` : ""}</td>`;
     });
     tds += `<td>${r.avg_tokens_per_second != null ? r.avg_tokens_per_second : "—"}</td>`;
     tds += `<td>${r.total_cost_usd != null ? fmtCost(r.total_cost_usd) : (r.provider === "openrouter" ? "—" : "free")}</td>`;
@@ -723,7 +731,8 @@ function renderLeaderboard() {
 
   host.innerHTML = `<div class="lb-scroll"><table class="leaderboard consolidated">
     <thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
-    <div class="muted lb-hint">Click a column header to sort · click a benchmark cell to open that run's details</div>`;
+    <div class="muted lb-hint">Click a column header to sort · click a benchmark cell to open that run's details
+      · <sup>*</sup> benchmark edited since the run · <sup>◔</sup> incomplete run</div>${storageFooter()}`;
 
   host.querySelectorAll("th[data-key]").forEach((th) => th.addEventListener("click", () => {
     const key = th.dataset.key;
@@ -735,6 +744,15 @@ function renderLeaderboard() {
     td.addEventListener("click", () => showRunDetail(td.dataset.rid)));
 }
 $("#refresh-history").addEventListener("click", loadHistory);
+
+function storageFooter() {
+  const st = lbData.storage;
+  if (!st) return "";
+  const bad = (st.unreadable || []).map((u) =>
+    `<div class="lb-unreadable">⚠ Could not read <code>${escapeHtml(u.file)}</code> — ${escapeHtml(u.error)}. The file was left untouched.</div>`).join("");
+  return `${bad}<div class="muted lb-hint">${st.runs} saved run${st.runs === 1 ? "" : "s"} in <code>${escapeHtml(st.dir)}</code>
+    · <a href="/api/export">⬇ Download backup (.zip)</a></div>`;
+}
 
 async function showRunDetail(id) {
   const r = await fetch("/api/results/" + id).then((x) => x.json());
@@ -749,7 +767,7 @@ async function showRunDetail(id) {
     ["Total time", fmtDur(r.total_time_s)],
   ];
   let html = `<div class="card"><div class="row between"><h2>${escapeHtml(r.model)}`
-    + `${r.cancelled ? ' <span class="warn">(stopped)</span>' : ""}</h2>`
+    + `${r.status === "interrupted" ? ' <span class="warn">(interrupted — partial)</span>' : r.cancelled ? ' <span class="warn">(stopped)</span>' : ""}</h2>`
     + `<div class="muted">${new Date(r.timestamp).toLocaleString()}</div></div>`
     + `<div class="metric-grid">`
     + overall.map(([k, v]) => `<div class="metric"><span class="mk">${k}</span><span class="mv">${escapeHtml(String(v))}</span></div>`).join("")

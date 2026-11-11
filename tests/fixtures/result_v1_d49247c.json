@@ -1,0 +1,80 @@
+{
+  "id": "20260822-221200-8cb523",
+  "timestamp": "2026-08-22T22:12:00.330240+00:00",
+  "provider": "local",
+  "model": "qwen3.5-9b-claude-4.6-highiq-instruct-heretic-uncensored-mlx-mxfp8",
+  "params": {
+    "temperature": 0,
+    "max_tokens": 256
+  },
+  "cancelled": false,
+  "overall_score": 100.0,
+  "total": 5,
+  "answered": 5,
+  "passed": 5,
+  "total_completion_tokens": 15,
+  "total_prompt_tokens": 165,
+  "total_tokens": 180,
+  "total_time_s": 23.613,
+  "avg_tokens_per_second": 4.3,
+  "total_cost_usd": 0.0,
+  "benchmarks": [
+    {
+      "type": "done",
+      "benchmark_id": "custom_example_trivia",
+      "benchmark_name": "Custom Example — World Capitals",
+      "category": "Custom",
+      "provider": "local",
+      "model": "qwen3.5-9b-claude-4.6-highiq-instruct-heretic-uncensored-mlx-mxfp8",
+      "total": 5,
+      "answered": 5,
+      "passed": 5,
+      "score": 100.0,
+      "avg_latency_s": 4.723,
+      "avg_ttft_s": 4.722,
+      "avg_tokens_per_second": 4.3,
+      "total_completion_tokens": 15,
+      "total_prompt_tokens": 165,
+      "total_tokens": 180,
+      "total_time_s": 23.613,
+      "total_cost_usd": 0.0,
+      "cancelled": false
+    }
+  ],
+  "cases": [
+    {
+      "id": "q1",
+      "prompt": "What is the capital of France?",
+      "expected": "Paris",
+      "output": "Paris",
+      "passed": true,
+      "detail": "looked for any of ['Paris']",
+      "latency_s": 21.195,
+      "ttft_s": 21.195,
+      "tokens": 2,
+      "prompt_tokens": 33,
+      "total_tokens": 35,
+      "tokens_per_second": 0.1,
+      "cost_usd": 0.0,
+      "finish_reason": "stop",
+      "benchmark_id": "custom_example_trivia"
+    },
+    {
+      "id": "q2",
+      "prompt": "What is the capital of Japan?",
+      "expected": "Tokyo",
+      "output": "Tokyo",
+      "passed": true,
+      "detail": "looked for any of ['Tokyo']",
+      "latency_s": 0.583,
+      "ttft_s": 0.582,
+      "tokens": 3,
+      "prompt_tokens": 33,
+      "total_tokens": 36,
+      "tokens_per_second": 5.1,
+      "cost_usd": 0.0,
+      "finish_reason": "stop",
+      "benchmark_id": "custom_example_trivia"
+    }
+  ]
+}

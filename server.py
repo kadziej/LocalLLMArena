@@ -21,9 +21,10 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+import storage
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 BENCH_DIR = os.path.join(ROOT, "benchmarks")
-RESULTS_DIR = os.path.join(ROOT, "results")
 WEB_DIR = os.path.join(ROOT, "web")
 CONFIG_PATH = os.path.join(ROOT, "config.json")
 
@@ -57,12 +58,24 @@ def save_local_settings(updates):
             current = {}
     for k, v in updates.items():
         current[k] = v
-    with open(LOCAL_SETTINGS_PATH, "w", encoding="utf-8") as f:
-        json.dump(current, f, indent=2)
+    storage.atomic_write_json(LOCAL_SETTINGS_PATH, current)
     return current
 
 
 CONFIG = load_config()
+
+
+def resolve_results_dir(cfg=None):
+    """Where run records live. Override with the ARENA_RESULTS_DIR env var or
+    "results_dir" in settings.local.json - e.g. a folder outside the checkout,
+    so `git clean` or a fresh clone can never take the history with it."""
+    cfg = CONFIG if cfg is None else cfg
+    d = os.environ.get("ARENA_RESULTS_DIR") or cfg.get("results_dir") or "results"
+    d = os.path.expanduser(d)
+    return d if os.path.isabs(d) else os.path.join(ROOT, d)
+
+
+RESULTS_DIR = resolve_results_dir()
 
 # Registry of in-flight runs so a separate request can cancel them.
 RUNS = {}            # run_id -> {"cancel": bool}
@@ -118,6 +131,8 @@ def list_models(provider="local"):
             mid = m.get("id")
             if not mid:
                 continue
+            if provider != "openrouter" and "embed" in mid.lower():
+                continue  # embedding models can't run chat benchmarks
             entry = {"id": mid, "name": m.get("name") or mid}
             pricing = m.get("pricing") or {}
             try:
@@ -507,25 +522,41 @@ def build_messages(bench, case):
     return messages
 
 
-def _avg(xs):
-    xs = [x for x in xs if x is not None]
-    return round(sum(xs) / len(xs), 3) if xs else None
-
-
-def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=None):
-    """emit(dict) pushes one NDJSON event to the client.
+def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=None,
+                         on_progress=None):
+    """emit(dict) pushes one NDJSON event to the client. `on_progress(summary,
+    cases)` is called after every case so the caller can checkpoint to disk.
     Returns (summary, case_results, cancelled)."""
     cases = bench.get("cases", [])
     total = len(cases)
-    passed = 0
-    latencies, ttfts, tps_list = [], [], []
-    comp_tokens_sum = 0
-    prompt_tokens_sum = 0
-    reasoning_tokens_sum = 0
-    cost_sum = 0.0
-    cost_known = False
     case_results = []
     cancelled = False
+    merged = dict(CONFIG.get("default_params", {}))
+    merged.update(bench.get("default_params", {}))
+    merged.update(params or {})
+    # Everything needed to interpret (or re-score) this result later, even if
+    # the benchmark file has since been edited or removed.
+    header = {
+        "type": "done",
+        "benchmark_id": bench["id"],
+        "benchmark_name": bench["name"],
+        "category": bench.get("category"),
+        "benchmark_hash": storage.benchmark_fingerprint(bench),
+        "benchmark_file": bench.get("_file"),
+        "scoring": bench.get("scoring"),
+        "system_prompt": bench.get("system_prompt"),
+        "params": merged,
+        "provider": provider,
+        "model": model,
+        "total": total,
+    }
+
+    def summary_now():
+        s = dict(header)
+        s.update(storage.summarize_cases(case_results))
+        s["cancelled"] = cancelled
+        return s
+
     emit({"type": "start", "benchmark_id": bench["id"],
           "benchmark_name": bench["name"], "total": total})
 
@@ -536,9 +567,17 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
         case_id = case.get("id", f"case_{i+1}")
         emit({"type": "case_start", "benchmark_id": bench["id"], "index": i,
               "total": total, "case_id": case_id, "prompt": case["prompt"]})
-        merged = dict(CONFIG.get("default_params", {}))
-        merged.update(bench.get("default_params", {}))
-        merged.update(params or {})
+        # a case may override the benchmark's scoring type
+        scoring = case.get("scoring") or bench["scoring"]
+        cr = {
+            "id": case_id,
+            "benchmark_id": bench["id"],
+            "prompt": case["prompt"],
+            "expected": case.get("expected"),
+            "scoring": scoring,
+        }
+        if case.get("system_prompt"):
+            cr["system_prompt"] = case["system_prompt"]
 
         def on_token(piece, count, kind="content"):
             emit({"type": "token", "benchmark_id": bench["id"],
@@ -551,8 +590,6 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
             if res.get("cancelled"):
                 cancelled = True
                 break
-            # a case may override the benchmark's scoring type
-            scoring = case.get("scoring") or bench["scoring"]
             answer = res.get("answer") or ""
             if not answer.strip() and res.get("reasoning"):
                 # The model was still thinking when generation stopped, so there
@@ -565,24 +602,7 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
             else:
                 ok, detail = score_case(scoring, case.get("expected"),
                                         answer, case.get("prompt"))
-            if res["latency_s"] is not None:
-                latencies.append(res["latency_s"])
-            if res.get("ttft_s") is not None:
-                ttfts.append(res["ttft_s"])
-            if res.get("tokens_per_second") is not None:
-                tps_list.append(res["tokens_per_second"])
-            comp_tokens_sum += res.get("tokens") or 0
-            prompt_tokens_sum += res.get("prompt_tokens") or 0
-            reasoning_tokens_sum += res.get("reasoning_tokens") or 0
-            if res.get("cost_usd") is not None:
-                cost_sum += res["cost_usd"]
-                cost_known = True
-            if ok:
-                passed += 1
-            cr = {
-                "id": case_id,
-                "prompt": case["prompt"],
-                "expected": case.get("expected"),
+            cr.update({
                 "output": answer,
                 "reasoning": res.get("reasoning") or "",
                 "reasoning_tokens": res.get("reasoning_tokens"),
@@ -597,177 +617,119 @@ def run_benchmark_stream(provider, model, bench, params, emit, should_cancel=Non
                 "tokens_per_second": res.get("tokens_per_second"),
                 "cost_usd": res.get("cost_usd"),
                 "finish_reason": res.get("finish_reason"),
-            }
+            })
+            # keep the untouched model text when inline <think> tags were
+            # stripped, so the split can be redone if the parser improves
+            raw = res.get("content") or ""
+            if raw.strip() != answer.strip():
+                cr["raw_output"] = raw
         except Exception as e:  # noqa: BLE001
-            cr = {
-                "id": case_id,
-                "prompt": case["prompt"],
-                "expected": case.get("expected"),
+            cr.update({
                 "output": "",
                 "passed": False,
                 "detail": f"ERROR: {e}",
                 "latency_s": None,
                 "tokens": None,
                 "error": True,
-            }
+            })
         case_results.append(cr)
         emit({"type": "case", "index": i, "total": total, "result": cr})
+        if on_progress:
+            try:
+                on_progress(summary_now(), case_results)
+            except OSError as e:
+                emit({"type": "error", "message": f"checkpoint failed: {e}"})
 
-    answered = len(case_results)
-    total_time = round(sum(x for x in latencies), 3) if latencies else 0.0
-    summary = {
-        "type": "done",
-        "benchmark_id": bench["id"],
-        "benchmark_name": bench["name"],
-        "category": bench.get("category"),
-        "provider": provider,
-        "model": model,
-        "total": total,
-        "answered": answered,
-        "passed": passed,
-        "score": round(100.0 * passed / answered, 1) if answered else 0.0,
-        "avg_latency_s": _avg(latencies),
-        "avg_ttft_s": _avg(ttfts),
-        "avg_tokens_per_second": _avg(tps_list),
-        "total_completion_tokens": comp_tokens_sum,
-        "total_prompt_tokens": prompt_tokens_sum,
-        "total_reasoning_tokens": reasoning_tokens_sum,
-        "total_tokens": comp_tokens_sum + prompt_tokens_sum,
-        "total_time_s": total_time,
-        "total_cost_usd": round(cost_sum, 6) if cost_known else None,
-        "cancelled": cancelled,
-    }
+    summary = summary_now()
     emit(summary)
     return summary, case_results, cancelled
 
 
-def save_result(provider, model, summaries, all_cases, params, cancelled=False):
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    rid = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    total = sum(s["total"] for s in summaries)
-    answered = sum(s.get("answered", s["total"]) for s in summaries)
-    passed = sum(s["passed"] for s in summaries)
-    comp_tokens = sum(s.get("total_completion_tokens") or 0 for s in summaries)
-    prompt_tokens = sum(s.get("total_prompt_tokens") or 0 for s in summaries)
-    reasoning_tokens = sum(s.get("total_reasoning_tokens") or 0 for s in summaries)
-    total_time = round(sum(s.get("total_time_s") or 0 for s in summaries), 3)
-    tps_vals = [s.get("avg_tokens_per_second") for s in summaries if s.get("avg_tokens_per_second")]
-    costs = [s.get("total_cost_usd") for s in summaries if s.get("total_cost_usd") is not None]
-    record = {
-        "id": rid,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "provider": provider,
-        "model": model,
-        "params": params,
-        "cancelled": cancelled,
-        "overall_score": round(100.0 * passed / answered, 1) if answered else 0.0,
-        "total": total,
-        "answered": answered,
-        "passed": passed,
-        "total_completion_tokens": comp_tokens,
-        "total_prompt_tokens": prompt_tokens,
-        "total_reasoning_tokens": reasoning_tokens,
-        "total_tokens": comp_tokens + prompt_tokens,
-        "total_time_s": total_time,
-        "avg_tokens_per_second": round(sum(tps_vals) / len(tps_vals), 1) if tps_vals else None,
-        "total_cost_usd": round(sum(costs), 6) if costs else None,
-        "benchmarks": summaries,
-        "cases": all_cases,
-    }
-    with open(os.path.join(RESULTS_DIR, rid + ".json"), "w", encoding="utf-8") as f:
-        json.dump(record, f, indent=2, ensure_ascii=False)
-    return record
-
-
+# --------------------------------------------------------------------------- #
+#  Saved runs (see storage.py for the durability rules)
+# --------------------------------------------------------------------------- #
 def list_results():
-    out = []
-    if not os.path.isdir(RESULTS_DIR):
-        return out
-    for fn in sorted(os.listdir(RESULTS_DIR), reverse=True):
-        if not fn.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(RESULTS_DIR, fn), "r", encoding="utf-8") as f:
-                r = json.load(f)
-            out.append({
-                "id": r["id"],
-                "timestamp": r["timestamp"],
-                "provider": r.get("provider", "local"),
-                "model": r["model"],
-                "overall_score": r["overall_score"],
-                "total": r["total"],
-                "answered": r.get("answered", r["total"]),
-                "passed": r["passed"],
-                "cancelled": r.get("cancelled", False),
-                "total_tokens": r.get("total_tokens"),
-                "total_time_s": r.get("total_time_s"),
-                "avg_tokens_per_second": r.get("avg_tokens_per_second"),
-                "total_cost_usd": r.get("total_cost_usd"),
-                "benchmarks": [
-                    {"benchmark_name": b["benchmark_name"], "score": b["score"],
-                     "passed": b["passed"], "total": b["total"]}
-                    for b in r.get("benchmarks", [])
-                ],
-            })
-        except Exception:  # noqa: BLE001
-            continue
-    return out
-
-
-def _iter_results():
-    if not os.path.isdir(RESULTS_DIR):
-        return
-    for fn in sorted(os.listdir(RESULTS_DIR)):
-        if not fn.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(RESULTS_DIR, fn), "r", encoding="utf-8") as f:
-                yield json.load(f)
-        except Exception:  # noqa: BLE001
-            continue
+    records, unreadable = storage.scan(RESULTS_DIR)
+    out = [{
+        "id": r["id"],
+        "timestamp": r["timestamp"],
+        "status": r["status"],
+        "schema_version": r["schema_version"],
+        "provider": r["provider"],
+        "model": r["model"],
+        "overall_score": r["overall_score"],
+        "total": r["total"],
+        "answered": r["answered"],
+        "passed": r["passed"],
+        "cancelled": r["cancelled"],
+        "total_tokens": r["total_tokens"],
+        "total_time_s": r["total_time_s"],
+        "avg_tokens_per_second": r["avg_tokens_per_second"],
+        "total_cost_usd": r["total_cost_usd"],
+        "benchmarks": [
+            {"benchmark_id": b["benchmark_id"], "benchmark_name": b["benchmark_name"],
+             "benchmark_hash": b["benchmark_hash"], "score": b["score"],
+             "passed": b["passed"], "total": b["total"]}
+            for b in r["benchmarks"]
+        ],
+    } for r in reversed(records)]
+    return {"results": out, "unreadable": unreadable}
 
 
 def build_leaderboard():
     """Consolidate every saved run into one row per (provider, model), with a
-    cell per benchmark. When a model has been run more than once, the most
-    recent run wins for each benchmark (so re-running refreshes that cell)."""
-    bench_order = {b["id"]: i for i, b in enumerate(all_benchmarks())}
-    bench_name = {b["id"]: b["name"] for b in all_benchmarks()}
+    cell per benchmark. For each cell the newest *clean* run wins (finished,
+    every case answered, no request errors); a stopped/interrupted/errored run
+    only fills a cell that has nothing better, so a failed re-run never hides
+    a good earlier result. Cells whose benchmark has changed since the run are
+    flagged `stale`."""
+    current = [b for b in all_benchmarks() if not b.get("error")]
+    bench_order = {b["id"]: i for i, b in enumerate(current)}
+    bench_name = {b["id"]: b["name"] for b in current}
+    bench_hash = {b["id"]: storage.benchmark_fingerprint(b) for b in current}
 
-    results = sorted(_iter_results(), key=lambda r: r.get("timestamp", ""))
+    results, unreadable = storage.scan(RESULTS_DIR)
     models = {}      # (provider, model) -> aggregate
     seen = {}        # bench_id -> display name
 
     for r in results:
-        prov = r.get("provider", "local")
-        model = r.get("model", "?")
-        ts = r.get("timestamp", "")
-        rid = r.get("id")
-        key = (prov, model)
-        m = models.setdefault(key, {"provider": prov, "model": model, "benches": {},
-                                    "last_run": ts, "run_ids": set()})
+        if r["status"] == "running":
+            continue  # still in flight; it lands here once it has finished
+        prov, model, ts, rid = r["provider"], r["model"], r["timestamp"], r["id"]
+        m = models.setdefault((prov, model), {"provider": prov, "model": model, "benches": {},
+                                              "last_run": ts, "run_ids": set()})
         m["run_ids"].add(rid)
         if ts > m["last_run"]:
             m["last_run"] = ts
-        for b in r.get("benchmarks", []):
-            bid = b.get("benchmark_id") or b.get("benchmark_name")
-            seen[bid] = b.get("benchmark_name", bid)
+        for b in r["benchmarks"]:
+            if not b["answered"]:
+                continue
+            bid = b["benchmark_id"]
+            seen[bid] = b["benchmark_name"]
+            clean = (not b.get("cancelled") and b["answered"] >= b["total"]
+                     and not b["errors"])
+            h = b["benchmark_hash"]
             entry = {
-                "score": b.get("score"),
-                "passed": b.get("passed"),
-                "answered": b.get("answered", b.get("total")),
+                "score": b["score"], "passed": b["passed"], "answered": b["answered"],
+                "total": b["total"], "errors": b["errors"],
                 "avg_tokens_per_second": b.get("avg_tokens_per_second"),
                 "total_cost_usd": b.get("total_cost_usd"),
                 "total_time_s": b.get("total_time_s"),
                 "total_tokens": b.get("total_tokens"),
                 "timestamp": ts, "result_id": rid,
+                "partial": not clean,
+                # stale: graded against a different version of the benchmark
+                # than the one on disk now (None = unknown, pre-v2 record)
+                "stale": (h != bench_hash[bid]) if (h and bid in bench_hash) else None,
+                "removed": bid not in bench_hash,
             }
             prev = m["benches"].get(bid)
-            if prev is None or ts >= prev["timestamp"]:
+            if prev is None or (clean, ts) >= (not prev["partial"], prev["timestamp"]):
                 m["benches"][bid] = entry
 
     col_ids = sorted(seen.keys(), key=lambda b: (bench_order.get(b, 999), seen[b]))
-    columns = [{"id": b, "name": bench_name.get(b, seen[b])} for b in col_ids]
+    columns = [{"id": b, "name": bench_name.get(b, seen[b]),
+                "removed": b not in bench_hash} for b in col_ids]
 
     rows = []
     for m in models.values():
@@ -782,10 +744,10 @@ def build_leaderboard():
             "provider": m["provider"], "model": m["model"],
             "overall_score": round(100.0 * passed / answered, 1) if answered else 0.0,
             "passed": passed, "answered": answered,
-            "benches": {bid: {"score": e["score"], "passed": e["passed"], "answered": e["answered"],
-                              "avg_tokens_per_second": e["avg_tokens_per_second"],
-                              "total_cost_usd": e["total_cost_usd"], "result_id": e["result_id"]}
-                        for bid, e in benches.items()},
+            "benches": {bid: {k: e[k] for k in (
+                "score", "passed", "answered", "total", "errors", "avg_tokens_per_second",
+                "total_cost_usd", "result_id", "partial", "stale", "removed")}
+                for bid, e in benches.items()},
             "avg_tokens_per_second": round(sum(tps) / len(tps), 1) if tps else None,
             "total_cost_usd": round(sum(costs), 6) if costs else None,
             "total_time_s": round(sum(times), 1) if times else None,
@@ -794,15 +756,14 @@ def build_leaderboard():
             "run_count": len(m["run_ids"]),
             "last_run": m["last_run"],
         })
-    return {"columns": columns, "rows": rows}
+    return {"columns": columns, "rows": rows,
+            "storage": {"dir": RESULTS_DIR, "runs": len(results),
+                        "schema_version": storage.SCHEMA_VERSION,
+                        "unreadable": unreadable}}
 
 
 def get_result(rid):
-    path = os.path.join(RESULTS_DIR, rid + ".json")
-    if not os.path.isfile(path):
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return storage.load_record(RESULTS_DIR, rid)
 
 
 # --------------------------------------------------------------------------- #
@@ -880,24 +841,39 @@ def run_worker(run):
             run_emit(run, {"type": "target_start", "index": idx, "total": len(targets),
                            "provider": provider, "model": model, "total_cases": total_cases})
             summaries, all_cases, tcancel = [], [], False
-            for bid in benchmark_ids:
-                if should_cancel():
-                    tcancel = True
-                    break
-                bench = get_benchmark(bid)
-                if bench is None:
-                    run_emit(run, {"type": "error", "message": f"benchmark {bid} not found"})
-                    continue
-                summary, cases, was_cancelled = run_benchmark_stream(
-                    provider, model, bench, params, lambda ev: run_emit(run, ev), should_cancel)
-                summaries.append(summary)
-                for c in cases:
-                    c["benchmark_id"] = bid
-                    all_cases.append(c)
-                if was_cancelled:
-                    tcancel = True
-                    break
-            record = save_result(provider, model, summaries, all_cases, params, cancelled=tcancel)
+            rid, started_at = storage.new_result_id(), storage.now_iso()
+
+            def write(status, partial_summary=None, partial_cases=()):
+                extra = [partial_summary] if partial_summary else []
+                rec = storage.build_record(
+                    rid, started_at, provider, model, params,
+                    summaries + extra, all_cases + list(partial_cases), status)
+                storage.write_record(RESULTS_DIR, rec)
+                return rec
+
+            storage.mark_active(rid)
+            try:
+                for bid in benchmark_ids:
+                    if should_cancel():
+                        tcancel = True
+                        break
+                    bench = get_benchmark(bid)
+                    if bench is None or bench.get("error"):
+                        run_emit(run, {"type": "error", "message": f"benchmark {bid} not found"})
+                        continue
+                    # checkpoint after every case: a crash keeps what finished
+                    summary, cases, was_cancelled = run_benchmark_stream(
+                        provider, model, bench, params, lambda ev: run_emit(run, ev),
+                        should_cancel,
+                        on_progress=lambda ps, pc: write("running", ps, pc))
+                    summaries.append(summary)
+                    all_cases.extend(cases)
+                    if was_cancelled:
+                        tcancel = True
+                        break
+                record = write("cancelled" if tcancel else "complete")
+            finally:
+                storage.mark_active(rid, False)
             run_emit(run, {"type": "saved", "index": idx, "result_id": record["id"],
                            "provider": provider, "model": model,
                            "overall_score": record["overall_score"], "passed": record["passed"],
@@ -1047,11 +1023,25 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(build_leaderboard())
             return
         if path == "/api/results":
-            self._send_json({"results": list_results()})
+            self._send_json(list_results())
+            return
+        if path == "/api/export":
+            body = storage.export_zip(RESULTS_DIR)
+            name = "LocalLLMArena-results-" + time.strftime("%Y%m%d-%H%M%S") + ".zip"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if path.startswith("/api/results/"):
             rid = path.rsplit("/", 1)[-1]
-            r = get_result(rid)
+            try:
+                r = get_result(rid)
+            except Exception as e:  # noqa: BLE001
+                self._send_json({"error": f"unreadable result file: {e}"}, 500)
+                return
             if r is None:
                 self._send_json({"error": "not found"}, 404)
             else:
@@ -1078,7 +1068,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": run is not None, "run_id": rid})
             return
         if path in ("/api/settings", "/api/reload-config"):
-            global CONFIG
+            global CONFIG, RESULTS_DIR
             body = self._read_body()
             updates = {}
             if "lmstudio_base_url" in body:
@@ -1092,6 +1082,7 @@ class Handler(BaseHTTPRequestHandler):
             if updates:
                 save_local_settings(updates)
             CONFIG = load_config()
+            RESULTS_DIR = resolve_results_dir()
             self._send_json({
                 "ok": True,
                 "lmstudio_base_url": CONFIG.get("lmstudio_base_url", ""),
@@ -1147,13 +1138,17 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     port = int(os.environ.get("PORT") or CONFIG.get("server_port", 8080))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    # Loopback only by default: the app has no auth and can spend OpenRouter
+    # credit. Set "server_host": "0.0.0.0" (or HOST) to expose it on the LAN.
+    host = os.environ.get("HOST") or CONFIG.get("server_host") or "127.0.0.1"
+    server = ThreadingHTTPServer((host, port), Handler)
     url = f"http://localhost:{port}"
     print("=" * 64)
     print("  LocalLLMArena is running")
     print(f"  Open:        {url}")
     print(f"  LM Studio:   {CONFIG['lmstudio_base_url']}")
     print(f"  Benchmarks:  {BENCH_DIR}")
+    print(f"  Results:     {RESULTS_DIR}")
     print("  Stop:        Ctrl+C")
     print("=" * 64)
     try:

@@ -319,3 +319,9 @@ details.reasoning pre { color: var(--muted); font-style: italic; }
 .or-status { font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
 .ok-tag { color: var(--green); }
 .linklike { color: var(--accent); cursor: pointer; text-decoration: underline; }
+
+/* leaderboard data-quality markers + storage footer */
+.lb-mark { font-size: 9px; margin-left: 1px; color: var(--amber); }
+.lb-cell.lb-flagged { opacity: 0.8; }
+.lb-unreadable { color: var(--amber); font-size: 12px; margin-top: 8px; }
+.lb-hint a { color: var(--accent); }

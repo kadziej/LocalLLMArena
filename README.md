@@ -226,9 +226,13 @@ server.py            Pure-stdlib HTTP server. Serves the web UI and a small JSON
                      scores each answer, computes metrics/cost, and streams
                      results back as newline-delimited JSON (NDJSON).
 benchmarks/*.json    One file per benchmark (see format above).
+storage.py           Durable run storage: atomic writes, schema versioning,
+                     tolerant reads, benchmark fingerprints, backup export.
 results/*.json       One file per run, powering the Leaderboard tab.
 web/                 index.html + app.js + styles.css — no framework, no build.
-tests/               stdlib unittest suite (scoring, extraction, reasoning split).
+tests/               stdlib unittest suite (scoring, reasoning split, storage
+                     durability). tests/fixtures/ holds a run file in every
+                     format the app has ever written.
 config.json          Generic defaults (committed). Points at localhost.
 settings.local.json  Your LM Studio URL + OpenRouter key (gitignored, never committed).
 ```
@@ -255,6 +259,40 @@ API endpoints (handy if you want to script runs):
 - `GET  /api/results` / `GET /api/results/{id}` — saved runs
 
 ---
+
+## Your run history is safe to build on
+
+Results are the valuable part of this app, so storage follows a few hard rules
+(implemented in `storage.py`, enforced by `tests/test_storage.py`):
+
+- **Append-only.** One JSON file per run. The app never rewrites, migrates or
+  deletes a finished run file - old formats are upgraded *in memory* when read.
+- **Atomic writes.** Temp file + fsync + rename, so a crash can't corrupt a file.
+- **Checkpointed.** The run file is updated after every case. Kill the server
+  mid-run and everything finished so far is kept, shown as *interrupted*.
+- **Self-describing.** Each record stores a `schema_version`, the app's git
+  commit, the effective parameters, and - per benchmark - a content fingerprint,
+  system prompt and scoring type, plus every case's prompt, expected answer and
+  the model's output. A run stays readable and re-scorable after its benchmark
+  file is edited or deleted.
+- **Honest leaderboard.** Editing a benchmark's cases changes its fingerprint;
+  older results in that column get a `*` (not comparable with newer runs). The
+  newest *complete* run wins a cell - a stopped, interrupted or errored re-run
+  (`◔`) never hides a good earlier result.
+- **Nothing vanishes silently.** A run file that can't be parsed is listed with
+  a warning on the Leaderboard tab and left untouched on disk.
+- **Backups.** *Leaderboard → Download backup (.zip)* (or `GET /api/export`)
+  bundles every run file.
+
+By default runs live in `results/` inside the checkout (gitignored - so
+`git clean -x` or a fresh clone would not have them). To keep them somewhere
+safer, set `"results_dir"` in `settings.local.json` (or the `ARENA_RESULTS_DIR`
+env var) to e.g. `~/Documents/LocalLLMArena-results` and move the files there.
+
+**When you change the record format:** bump `SCHEMA_VERSION` in `storage.py`,
+teach `upgrade_record` the old shape, and add a sample file of the *old* shape
+to `tests/fixtures/` (never edit existing fixtures) - the suite loads every
+fixture through the full read path.
 
 ## Tests
 
@@ -283,6 +321,7 @@ graded as if it were the answer.
 - `temperature: 0` is recommended for reproducible benchmarking.
 - **OpenRouter costs real money.** Cost shown is what OpenRouter reports for the
   run. Watch `max_tokens` and benchmark sizes when testing expensive models.
-- The server binds to `0.0.0.0` so you can reach it from other devices on your
-  LAN; it has no authentication, so only run it on a trusted network. Your
+- The server listens on `127.0.0.1` only. It has no authentication, so to
+  reach it from other devices on a trusted LAN you must opt in with
+  `"server_host": "0.0.0.0"` in `settings.local.json` (or `HOST=0.0.0.0`). Your
   OpenRouter key is stored in plain text in `settings.local.json` (gitignored).
